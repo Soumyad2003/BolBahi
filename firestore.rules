@@ -1,0 +1,218 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(data) {
+      return isVerified() && data.ownerId == request.auth.uid;
+    }
+
+    function isValidAliasList(aliases) {
+      return aliases is list
+        && aliases.size() <= 15
+        && (aliases.size() == 0 || (aliases[0] is string && aliases[0].size() >= 1 && aliases[0].size() <= 60));
+    }
+
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['ownerId', 'slug', 'name', 'phone', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'slug', 'name', 'phone', 'createdAt', 'updatedAt'])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 64 && data.slug.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 15 && data.phone.matches('^[0-9]{10,15}$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidItem(data) {
+      return data.keys().hasAll([
+          'ownerId', 'slug', 'name', 'aliases', 'unit',
+          'price', 'gstPercent', 'stock', 'reorderThreshold',
+          'supplierId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'slug', 'name', 'aliases', 'unit',
+          'price', 'gstPercent', 'stock', 'reorderThreshold',
+          'supplierId', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 64 && data.slug.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && isValidAliasList(data.aliases)
+        && data.unit is string && data.unit.size() >= 1 && data.unit.size() <= 24
+        && data.price is number && data.price >= 0 && data.price <= 100000
+        && data.gstPercent is number && data.gstPercent >= 0 && data.gstPercent <= 28
+        && data.stock is number && data.stock >= 0 && data.stock <= 100000
+        && data.reorderThreshold is number && data.reorderThreshold >= 0 && data.reorderThreshold <= 10000
+        && isValidId(data.supplierId)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll([
+          'ownerId', 'slug', 'name', 'aliases', 'phone',
+          'udhaarBalance', 'lastPaymentDaysAgo', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'slug', 'name', 'aliases', 'phone',
+          'udhaarBalance', 'lastPaymentDaysAgo', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 64 && data.slug.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && isValidAliasList(data.aliases)
+        && data.phone is string && data.phone.size() <= 15 && data.phone.matches('^([0-9]{10,15})?$')
+        && data.udhaarBalance is number && data.udhaarBalance >= 0 && data.udhaarBalance <= 10000000
+        && data.lastPaymentDaysAgo is number && data.lastPaymentDaysAgo >= 0 && data.lastPaymentDaysAgo <= 3650
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll([
+          'ownerId', 'customerId', 'customerName', 'customerPhone',
+          'transcript', 'items', 'total', 'gstIncluded',
+          'cashPaid', 'upiPaid', 'newUdhaar', 'changeToReturn',
+          'parserSource', 'dateKey', 'status', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'customerId', 'customerName', 'customerPhone',
+          'transcript', 'items', 'total', 'gstIncluded',
+          'cashPaid', 'upiPaid', 'newUdhaar', 'changeToReturn',
+          'parserSource', 'dateKey', 'status', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.customerId)
+        && data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 120
+        && data.customerPhone is string && data.customerPhone.size() <= 15 && data.customerPhone.matches('^([0-9]{10,15})?$')
+        && data.transcript is string && data.transcript.size() >= 1 && data.transcript.size() <= 1000
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 30 && data.items[0] is map
+        && data.total is number && data.total >= 0 && data.total <= 10000000
+        && data.gstIncluded is number && data.gstIncluded >= 0 && data.gstIncluded <= 5000000
+        && data.cashPaid is number && data.cashPaid >= 0 && data.cashPaid <= 10000000
+        && data.upiPaid is number && data.upiPaid >= 0 && data.upiPaid <= 10000000
+        && data.newUdhaar is number && data.newUdhaar >= 0 && data.newUdhaar <= 10000000
+        && data.changeToReturn is number && data.changeToReturn >= 0 && data.changeToReturn <= 10000000
+        && data.parserSource is string && data.parserSource in ['gemini', 'pre-router', 'fallback', 'seed']
+        && data.dateKey is string && data.dateKey.size() == 10 && data.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.status is string && data.status == 'confirmed'
+        && data.createdAt is timestamp;
+    }
+
+    match /suppliers/{supplierId} {
+      allow get: if isValidId(supplierId) && isOwner(existing());
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified()
+        && isValidId(supplierId)
+        && isValidSupplier(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(supplierId)
+        && isValidSupplier(incoming())
+        && isOwner(existing())
+        && incoming().ownerId == existing().ownerId
+        && incoming().slug == existing().slug
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'updatedAt']);
+      allow delete: if isValidId(supplierId) && isOwner(existing());
+    }
+
+    match /items/{itemId} {
+      allow get: if isValidId(itemId) && isOwner(existing());
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified()
+        && isValidId(itemId)
+        && isValidItem(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/suppliers/$(incoming().supplierId))
+        && get(/databases/$(database)/documents/suppliers/$(incoming().supplierId)).data.ownerId == request.auth.uid;
+      allow update: if isVerified()
+        && isValidId(itemId)
+        && isValidItem(incoming())
+        && isOwner(existing())
+        && incoming().ownerId == existing().ownerId
+        && incoming().slug == existing().slug
+        && incoming().supplierId == existing().supplierId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['price', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'aliases', 'unit', 'price', 'gstPercent',
+            'stock', 'reorderThreshold', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(itemId) && isOwner(existing());
+    }
+
+    match /customers/{customerId} {
+      allow get: if isValidId(customerId) && isOwner(existing());
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified()
+        && isValidId(customerId)
+        && isValidCustomer(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(customerId)
+        && isValidCustomer(incoming())
+        && isOwner(existing())
+        && incoming().ownerId == existing().ownerId
+        && incoming().slug == existing().slug
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['udhaarBalance', 'lastPaymentDaysAgo', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['udhaarBalance', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'aliases', 'updatedAt'])
+        );
+      allow delete: if isValidId(customerId) && isOwner(existing());
+    }
+
+    match /transactions/{transactionId} {
+      allow get: if isValidId(transactionId) && isOwner(existing());
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified()
+        && isValidId(transactionId)
+        && isValidTransaction(incoming())
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/customers/$(incoming().customerId))
+        && get(/databases/$(database)/documents/customers/$(incoming().customerId)).data.ownerId == request.auth.uid;
+      allow update: if false;
+      allow delete: if isValidId(transactionId) && isOwner(existing());
+    }
+  }
+}

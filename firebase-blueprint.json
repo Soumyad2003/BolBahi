@@ -1,0 +1,292 @@
+{
+  "entities": {
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Wholesale kirana distributor supplying inventory items.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 15,
+          "pattern": "^[0-9]{10,15}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "slug", "name", "phone", "createdAt", "updatedAt"]
+    },
+    "Item": {
+      "title": "Item",
+      "description": "Kirana inventory SKU with MRP-inclusive price, GST rate, aliases, stock count, and supplier link.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "aliases": {
+          "type": "array",
+          "description": "Hinglish and brand aliases (max 15)."
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "price": {
+          "type": "number",
+          "description": "MRP-inclusive unit price in INR."
+        },
+        "gstPercent": {
+          "type": "number",
+          "description": "Included GST percentage (0, 5, 12, 18, 28)."
+        },
+        "stock": {
+          "type": "number",
+          "description": "Current live stock quantity."
+        },
+        "reorderThreshold": {
+          "type": "number",
+          "description": "Stock threshold at or below which item enters restock queue."
+        },
+        "supplierId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "slug",
+        "name",
+        "aliases",
+        "unit",
+        "price",
+        "gstPercent",
+        "stock",
+        "reorderThreshold",
+        "supplierId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Kirana khata customer with credit balance, phone number, and Hinglish aliases.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "aliases": {
+          "type": "array",
+          "description": "Hinglish aliases and honorifics (max 15)."
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 15,
+          "pattern": "^([0-9]{10,15})?$"
+        },
+        "udhaarBalance": {
+          "type": "number",
+          "description": "Current outstanding credit balance in INR."
+        },
+        "lastPaymentDaysAgo": {
+          "type": "number",
+          "description": "Days since last payment."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "slug",
+        "name",
+        "aliases",
+        "phone",
+        "udhaarBalance",
+        "lastPaymentDaysAgo",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Confirmed kirana counter bill with raw voice transcript, itemized MRP-inclusive rows, and Cash/UPI/Udhaar breakdown.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "customerPhone": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 15,
+          "pattern": "^([0-9]{10,15})?$"
+        },
+        "transcript": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "items": {
+          "type": "array",
+          "description": "Bounded list of billed items (1 to 30)."
+        },
+        "total": {
+          "type": "number"
+        },
+        "gstIncluded": {
+          "type": "number"
+        },
+        "cashPaid": {
+          "type": "number"
+        },
+        "upiPaid": {
+          "type": "number"
+        },
+        "newUdhaar": {
+          "type": "number"
+        },
+        "changeToReturn": {
+          "type": "number"
+        },
+        "parserSource": {
+          "type": "string",
+          "enum": ["gemini", "pre-router", "fallback", "seed"]
+        },
+        "dateKey": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["confirmed"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "customerId",
+        "customerName",
+        "customerPhone",
+        "transcript",
+        "items",
+        "total",
+        "gstIncluded",
+        "cashPaid",
+        "upiPaid",
+        "newUdhaar",
+        "changeToReturn",
+        "parserSource",
+        "dateKey",
+        "status",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Owner-scoped wholesale kirana suppliers."
+    },
+    "/items/{itemId}": {
+      "schema": { "$ref": "#/entities/Item" },
+      "description": "Owner-scoped kirana catalog items with live stock."
+    },
+    "/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "Owner-scoped khata customers with udhaar balances and phone numbers."
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Owner-scoped confirmed counter bills with voice transcripts."
+    }
+  }
+}
