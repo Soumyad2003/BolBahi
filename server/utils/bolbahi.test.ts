@@ -739,6 +739,82 @@ test('Voice ORDER_RESTOCK works for quick replies, itemized orders, active draft
   assert.equal(cancelRestock?.restockDraft, null);
 });
 
+test('Instant Demo localDemoStore handles billing, low-stock alerts, undo, udhaar, restock, and add customer offline', async () => {
+  const {
+    createSeedDemoState,
+    confirmDraftBillLocal,
+    undoTransactionLocal,
+    settleCustomerUdhaarLocal,
+    restockItemsBatchLocal,
+    addCustomerLocal,
+  } = await import('../../src/utils/localDemoStore.ts');
+
+  const seed = createSeedDemoState(1_700_000_000_000);
+  assert.equal(seed.items.length, 15);
+  assert.equal(seed.customers.length, 6);
+  assert.equal(seed.suppliers.length, 2);
+  assert.equal(seed.transactions.length, 3);
+
+  // 1. Build & confirm a multi-item sale that drops Atta (12 -> 7) and Oil (6 -> 4) below threshold
+  const draft = buildNewDraftBill({
+    customerQuery: 'Rajesh Sharma',
+    extractedItems: [
+      { rawName: 'Aashirvaad atta', matchedSlug: 'atta', qty: 5, unit: 'kg', overridePrice: null },
+      { rawName: 'Fortune tel', matchedSlug: 'tel', qty: 2, unit: 'L', overridePrice: null },
+      { rawName: 'Tata namak', matchedSlug: 'namak', qty: 1, unit: 'pkt', overridePrice: null },
+    ],
+    cashPaid: 300,
+    upiPaid: 0,
+    isUdhaar: true,
+    transcript: 'Rajesh Sharma 5 kilo atta 2 litre tel 1 namak 300 cash',
+    parserSource: 'fallback',
+    catalog: seed.items,
+    customers: seed.customers,
+  });
+
+  const confirmed = confirmDraftBillLocal(seed, draft, 1_700_000_060_000);
+  assert.equal(confirmed.nextState.transactions.length, 4);
+  assert.equal(confirmed.transaction.total, 608);
+  assert.equal(confirmed.nextState.items.find((i) => i.slug === 'atta')?.stock, 7);
+  assert.equal(confirmed.nextState.items.find((i) => i.slug === 'tel')?.stock, 4);
+  assert.equal(
+    confirmed.nextState.customers.find((c) => c.slug === 'rajesh-sharma')?.udhaarBalance,
+    728
+  );
+  assert.equal(confirmed.lowStockAlerts.length, 2);
+  assert.equal(confirmed.lowStockAlerts[0].suggestedOrderQty, 13);
+  assert.equal(confirmed.lowStockAlerts[1].suggestedOrderQty, 12);
+
+  // 2. Undo restores stock, udhaar, and removes transaction
+  const undone = undoTransactionLocal(confirmed.nextState, confirmed.undoPayload);
+  assert.equal(undone.transactions.length, 3);
+  assert.equal(undone.items.find((i) => i.slug === 'atta')?.stock, 12);
+  assert.equal(undone.customers.find((c) => c.slug === 'rajesh-sharma')?.udhaarBalance, 420);
+
+  // 3. Batch restock increments stock atomically
+  const attaItem = confirmed.nextState.items.find((i) => i.slug === 'atta')!;
+  const telItem = confirmed.nextState.items.find((i) => i.slug === 'tel')!;
+  const restocked = restockItemsBatchLocal(confirmed.nextState, [
+    { item: attaItem, addedQty: 13 },
+    { item: telItem, addedQty: 12 },
+  ]);
+  assert.equal(restocked.items.find((i) => i.slug === 'atta')?.stock, 20);
+  assert.equal(restocked.items.find((i) => i.slug === 'tel')?.stock, 16);
+
+  // 4. Settle udhaar + add customer
+  const rajesh = restocked.customers.find((c) => c.slug === 'rajesh-sharma')!;
+  const settled = settleCustomerUdhaarLocal(restocked, rajesh.id, 228);
+  assert.equal(settled.customers.find((c) => c.slug === 'rajesh-sharma')?.udhaarBalance, 500);
+
+  const withNewCust = addCustomerLocal(settled, {
+    name: 'Anil Gupta',
+    phone: '9876501234',
+    aliases: ['gupta ji'],
+  });
+  assert.equal(withNewCust.customers.length, 7);
+  assert.equal(withNewCust.customers[6].name, 'Anil Gupta');
+});
+
 
 
 

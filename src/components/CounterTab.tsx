@@ -50,6 +50,7 @@ interface CounterTabProps {
   undoSecondsLeft: number;
   onUndoLastBill: () => Promise<void>;
   recentTransactions: TransactionDoc[];
+  hasGeminiKey?: boolean | null;
 }
 
 function formatTime(ms?: number): string {
@@ -95,6 +96,7 @@ export function CounterTab({
   undoSecondsLeft,
   onUndoLastBill,
   recentTransactions,
+  hasGeminiKey = null,
 }: CounterTabProps) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -108,6 +110,7 @@ export function CounterTab({
           onReplaySpoken={onReplaySpoken}
           parserMode={parserMode}
           onParserModeChange={onParserModeChange}
+          hasGeminiKey={hasGeminiKey}
           hasActiveDraft={Boolean(draft)}
           hasLowStockAlert={lowStockAlerts.length > 0}
           hasActiveRestockDraft={Boolean(restockDraft)}
@@ -124,7 +127,7 @@ export function CounterTab({
                 <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
                 <div>
                   <h2 className="text-base font-bold text-emerald-950">
-                    Bill Saved to Firestore · {lastSavedTx.customerName}
+                    Bill Saved · {lastSavedTx.customerName}
                   </h2>
                   <p className="text-sm text-emerald-900 font-mono tabular-nums mt-0.5">
                     Total {formatINR(lastSavedTx.total)} · Cash {formatINR(lastSavedTx.cashPaid)} ·

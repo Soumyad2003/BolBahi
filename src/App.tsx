@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
-import { collection, onSnapshot, query, where, type Timestamp } from 'firebase/firestore';
 import type {
   CustomerDoc,
   DraftBill,
@@ -11,33 +9,29 @@ import type {
   SupplierDoc,
   TodayStats,
   TransactionDoc,
+  UndoBillPayload,
   VoiceParseResponse,
 } from '../shared/types';
+import { getTodayDateKey } from '../shared/seedCatalog';
 import {
   buildPostConfirmLowStockSpeech,
   buildRestockDraftFromAlerts,
   buildRestockSpokenSummary,
 } from '../shared/restockMath';
 import {
-  auth,
-  db,
-  googleProvider,
-  handleFirestoreError,
-  OperationType,
-} from './firebase/config';
-import { getTodayDateKey, resetShopData, seedShopData } from './firebase/seedData';
-import {
-  addCustomerInFirestore,
-  confirmDraftBillInFirestore,
-  restockItemInFirestore,
-  restockItemsBatchInFirestore,
-  settleCustomerUdhaarInFirestore,
-  undoTransactionInFirestore,
-  type UndoBillPayload,
-} from './firebase/shopService';
+  addCustomerLocal,
+  confirmDraftBillLocal,
+  loadLocalDemoState,
+  resetLocalDemoState,
+  restockItemLocal,
+  restockItemsBatchLocal,
+  saveLocalDemoState,
+  settleCustomerUdhaarLocal,
+  undoTransactionLocal,
+  type LocalDemoState,
+} from './utils/localDemoStore';
 import { speakHinglish, stopSpeaking } from './utils/voiceAndWhatsapp';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { SignInScreen } from './components/SignInScreen';
 import { Header, type ActiveTab, type ParserBadgeLabel } from './components/Header';
 import { CounterTab } from './components/CounterTab';
 import { KhataTab } from './components/KhataTab';
@@ -45,17 +39,22 @@ import { GallaStockTab } from './components/GallaStockTab';
 import { BottomNav } from './components/BottomNav';
 
 function BolBahiApp() {
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
-  const [signingIn, setSigningIn] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [hasGeminiKey, setHasGeminiKey] = useState<boolean | null>(null);
 
-  const [items, setItems] = useState<ItemDoc[]>([]);
-  const [customers, setCustomers] = useState<CustomerDoc[]>([]);
-  const [suppliers, setSuppliers] = useState<SupplierDoc[]>([]);
-  const [transactions, setTransactions] = useState<TransactionDoc[]>([]);
-  const [loadingShop, setLoadingShop] = useState(true);
+  const initialDemo = useMemo(() => loadLocalDemoState(), []);
+  const [items, setItems] = useState<ItemDoc[]>(initialDemo.items);
+  const [customers, setCustomers] = useState<CustomerDoc[]>(initialDemo.customers);
+  const [suppliers, setSuppliers] = useState<SupplierDoc[]>(initialDemo.suppliers);
+  const [transactions, setTransactions] = useState<TransactionDoc[]>(initialDemo.transactions);
   const [resetting, setResetting] = useState(false);
+
+  const applyLocalDemoState = useCallback((next: LocalDemoState) => {
+    setItems(next.items);
+    setCustomers(next.customers);
+    setSuppliers(next.suppliers);
+    setTransactions(next.transactions);
+    saveLocalDemoState(next);
+  }, []);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('counter');
   const [filterCustomerId, setFilterCustomerId] = useState<string | null>(null);
@@ -77,15 +76,24 @@ function BolBahiApp() {
   });
   const [muted, setMuted] = useState(false);
 
-  const handleParserModeChange = useCallback((mode: ParserMode) => {
-    setParserMode(mode);
-    setParserLabel(mode === 'offline' ? 'Offline Local' : 'Gemini Flash-Lite');
-    try {
-      window.localStorage.setItem('bolbahi_parser_mode', mode);
-    } catch {
-      // Ignore storage errors in restricted contexts
-    }
-  }, []);
+  const handleParserModeChange = useCallback(
+    (mode: ParserMode) => {
+      setParserMode(mode);
+      setParserLabel(
+        mode === 'offline'
+          ? 'Offline Local'
+          : hasGeminiKey === false
+            ? 'Offline Fallback'
+            : 'Gemini Flash-Lite'
+      );
+      try {
+        window.localStorage.setItem('bolbahi_parser_mode', mode);
+      } catch {
+        // Ignore storage errors in restricted contexts
+      }
+    },
+    [hasGeminiKey]
+  );
 
   const [draft, setDraft] = useState<DraftBill | null>(null);
   const [lowStockAlerts, setLowStockAlerts] = useState<LowStockAlertItem[]>([]);
@@ -100,126 +108,39 @@ function BolBahiApp() {
   const [undoPayload, setUndoPayload] = useState<UndoBillPayload | null>(null);
   const [undoSecondsLeft, setUndoSecondsLeft] = useState(0);
 
-  const seededRef = useRef(false);
   const undoIntervalRef = useRef<number | null>(null);
 
-  // Firebase Auth listener
+  // Check backend health / optional GEMINI_API_KEY availability
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (nextUser) => {
-      setUser(nextUser);
-      setAuthReady(true);
-      if (!nextUser) {
-        seededRef.current = false;
-        setItems([]);
-        setCustomers([]);
-        setSuppliers([]);
-        setTransactions([]);
-        setDraft(null);
-        setLowStockAlerts([]);
-        setRestockDraft(null);
-        setLastSavedTx(null);
-        setLoadingShop(false);
-      }
-    });
-    return () => unsub();
-  }, []);
-
-  // Firestore real-time subscriptions (strictly attached only when authenticated)
-  useEffect(() => {
-    if (!authReady || !user) return;
-    setLoadingShop(true);
-    let itemsLoaded = false;
-
-    const uid = user.uid;
-
-    const unsubSuppliers = onSnapshot(
-      query(collection(db, 'suppliers'), where('ownerId', '==', uid)),
-      (snap) => {
-        setSuppliers(
-          snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<SupplierDoc, 'id'>),
-          }))
-        );
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'suppliers')
-    );
-
-    const unsubItems = onSnapshot(
-      query(collection(db, 'items'), where('ownerId', '==', uid)),
-      (snap) => {
-        const loaded = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<ItemDoc, 'id'>),
-        }));
-        setItems(loaded);
-
-        if (!itemsLoaded) {
-          itemsLoaded = true;
-          if (loaded.length === 0 && !seededRef.current) {
-            seededRef.current = true;
-            void seedShopData(uid).finally(() => setLoadingShop(false));
-          } else {
-            setLoadingShop(false);
+    let active = true;
+    fetch('/api/health')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { hasGeminiKey?: boolean } | null) => {
+        if (!active || !data) return;
+        const keyAvailable = Boolean(data.hasGeminiKey);
+        setHasGeminiKey(keyAvailable);
+        if (!keyAvailable) {
+          let storedMode: string | null = null;
+          try {
+            storedMode = window.localStorage.getItem('bolbahi_parser_mode');
+          } catch {
+            storedMode = null;
+          }
+          if (!storedMode) {
+            setParserMode('offline');
+            setParserLabel('Offline Local');
+          } else if (storedMode !== 'offline') {
+            setParserLabel('Offline Fallback');
           }
         }
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'items')
-    );
-
-    const unsubCustomers = onSnapshot(
-      query(collection(db, 'customers'), where('ownerId', '==', uid)),
-      (snap) => {
-        setCustomers(
-          snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<CustomerDoc, 'id'>),
-          }))
-        );
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'customers')
-    );
-
-    const unsubTransactions = onSnapshot(
-      query(collection(db, 'transactions'), where('ownerId', '==', uid)),
-      (snap) => {
-        const loaded = snap.docs.map((d) => {
-          const data = d.data() as Omit<TransactionDoc, 'id' | 'createdAtMs'> & {
-            createdAt?: Timestamp | null;
-          };
-          return {
-            id: d.id,
-            ownerId: data.ownerId,
-            customerId: data.customerId,
-            customerName: data.customerName,
-            customerPhone: data.customerPhone,
-            transcript: data.transcript,
-            items: data.items,
-            total: data.total,
-            gstIncluded: data.gstIncluded,
-            cashPaid: data.cashPaid,
-            upiPaid: data.upiPaid,
-            newUdhaar: data.newUdhaar,
-            changeToReturn: data.changeToReturn,
-            parserSource: data.parserSource,
-            dateKey: data.dateKey,
-            status: data.status,
-            createdAtMs: data.createdAt?.toMillis?.() ?? Date.now(),
-          } satisfies TransactionDoc;
-        });
-        loaded.sort((a, b) => (b.createdAtMs ?? 0) - (a.createdAtMs ?? 0));
-        setTransactions(loaded);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'transactions')
-    );
-
+      })
+      .catch(() => {
+        // Non-blocking health check
+      });
     return () => {
-      unsubSuppliers();
-      unsubItems();
-      unsubCustomers();
-      unsubTransactions();
+      active = false;
     };
-  }, [authReady, user]);
+  }, []);
 
   // 5-Second Undo Countdown Timer
   useEffect(() => {
@@ -268,19 +189,20 @@ function BolBahiApp() {
   const speak = useCallback(
     (msg: string) => {
       setLastSpokenReply(msg);
-      speakHinglish(msg, muted, 'en-IN', parserMode === 'gemini');
+      const useGeminiTts = parserMode === 'gemini' && hasGeminiKey !== false;
+      speakHinglish(msg, muted, 'en-IN', useGeminiTts);
     },
-    [muted, parserMode]
+    [muted, parserMode, hasGeminiKey]
   );
 
   const handleReplaySpoken = useCallback(() => {
     if (!lastSpokenReply) return;
-    speakHinglish(lastSpokenReply, false, 'en-IN', parserMode === 'gemini');
-  }, [lastSpokenReply, parserMode]);
+    const useGeminiTts = parserMode === 'gemini' && hasGeminiKey !== false;
+    speakHinglish(lastSpokenReply, false, 'en-IN', useGeminiTts);
+  }, [lastSpokenReply, parserMode, hasGeminiKey]);
 
   const recalculateOnServer = useCallback(
     async (nextDraft: DraftBill, announce = false) => {
-      // Optimistically render draft immediately, then sync deterministic Node.js calculation
       setDraft(nextDraft);
       try {
         const res = await fetch('/api/bill/calculate', {
@@ -305,7 +227,7 @@ function BolBahiApp() {
   const handleConfirmDraft = useCallback(
     async (draftToConfirm?: DraftBill) => {
       const target = draftToConfirm ?? draft;
-      if (!user || !target || confirmingBill) return;
+      if (!target || confirmingBill) return;
       if (target.ambiguousCustomers.length > 1 || target.items.some((it) => it.rateMissing)) {
         return;
       }
@@ -313,25 +235,20 @@ function BolBahiApp() {
       setConfirmingBill(true);
       setWarningBanner(null);
       try {
-        const {
-          transaction,
-          undoPayload: nextUndo,
-          lowStockAlerts: nextAlerts,
-        } = await confirmDraftBillInFirestore({
-          uid: user.uid,
-          draft: target,
-          catalogItems: items,
-          customers,
-          suppliers,
-        });
+        const localRes = confirmDraftBillLocal(
+          { items, customers, suppliers, transactions },
+          target
+        );
+        applyLocalDemoState(localRes.nextState);
+
         setDraft(null);
-        setLastSavedTx(transaction);
-        setUndoPayload(nextUndo);
+        setLastSavedTx(localRes.transaction);
+        setUndoPayload(localRes.undoPayload);
         setUndoSecondsLeft(5);
-        setLowStockAlerts(nextAlerts);
-        if (nextAlerts.length > 0) {
+        setLowStockAlerts(localRes.lowStockAlerts);
+        if (localRes.lowStockAlerts.length > 0) {
           speak(
-            `Bill save ho gaya. ${buildPostConfirmLowStockSpeech(nextAlerts)}`
+            `Bill save ho gaya. ${buildPostConfirmLowStockSpeech(localRes.lowStockAlerts)}`
           );
         } else {
           speak('Bill save ho gaya. WhatsApp receipt ready hai.');
@@ -342,7 +259,16 @@ function BolBahiApp() {
         setConfirmingBill(false);
       }
     },
-    [user, draft, confirmingBill, items, customers, suppliers, speak]
+    [
+      draft,
+      confirmingBill,
+      items,
+      customers,
+      suppliers,
+      transactions,
+      applyLocalDemoState,
+      speak,
+    ]
   );
 
   const handleProcessUtterance = useCallback(
@@ -375,7 +301,7 @@ function BolBahiApp() {
         const result = (await response.json()) as VoiceParseResponse;
         if (parserMode === 'offline') {
           setParserLabel('Offline Local');
-        } else if (result.parserSource === 'fallback') {
+        } else if (result.parserSource === 'fallback' || hasGeminiKey === false) {
           setParserLabel('Offline Fallback');
         } else {
           setParserLabel('Gemini Flash-Lite');
@@ -435,6 +361,7 @@ function BolBahiApp() {
       suppliers,
       todayStats,
       parserMode,
+      hasGeminiKey,
       activeTab,
       handleConfirmDraft,
       speak,
@@ -448,7 +375,11 @@ function BolBahiApp() {
     setUndoSecondsLeft(0);
     setLastSavedTx(null);
     setLowStockAlerts([]);
-    await undoTransactionInFirestore(payload);
+    const restored = undoTransactionLocal(
+      { items, customers, suppliers, transactions },
+      payload
+    );
+    applyLocalDemoState(restored);
     speak('Pichla bill undo ho gaya.');
   };
 
@@ -520,7 +451,11 @@ function BolBahiApp() {
 
     setReceivingGroupKey(groupKey);
     try {
-      await restockItemsBatchInFirestore(entries);
+      const nextLocal = restockItemsBatchLocal(
+        { items, customers, suppliers, transactions },
+        entries
+      );
+      applyLocalDemoState(nextLocal);
       setRestockDraft((prev) => {
         if (!prev) return null;
         const remaining = prev.items.filter((l) => !itemIds.includes(l.itemId));
@@ -592,21 +527,7 @@ function BolBahiApp() {
     });
   };
 
-  const handleSignIn = async () => {
-    setSigningIn(true);
-    setAuthError(null);
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Sign-in was cancelled.';
-      setAuthError(msg);
-    } finally {
-      setSigningIn(false);
-    }
-  };
-
   const handleResetDemo = async () => {
-    if (!user) return;
     setResetting(true);
     try {
       setDraft(null);
@@ -617,33 +538,23 @@ function BolBahiApp() {
       setUndoSecondsLeft(0);
       setWarningBanner(null);
       setFilterCustomerId(null);
-      setParserLabel(parserMode === 'offline' ? 'Offline Local' : 'Gemini Flash-Lite');
-      await resetShopData(user.uid);
+      setParserLabel(
+        parserMode === 'offline'
+          ? 'Offline Local'
+          : hasGeminiKey === false
+            ? 'Offline Fallback'
+            : 'Gemini Flash-Lite'
+      );
+      const fresh = resetLocalDemoState();
+      setItems(fresh.items);
+      setCustomers(fresh.customers);
+      setSuppliers(fresh.suppliers);
+      setTransactions(fresh.transactions);
       speak('Demo data reset ho gaya.');
     } finally {
       setResetting(false);
     }
   };
-
-  if (!authReady) {
-    return (
-      <div className="min-h-screen bg-[#F5F5F4] flex items-center justify-center p-6">
-        <div className="bg-white border border-stone-200 rounded-2xl px-6 py-5 text-base font-semibold text-stone-700">
-          Loading BolBahi...
-        </div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <SignInScreen
-        onSignIn={() => void handleSignIn()}
-        signingIn={signingIn}
-        errorMessage={authError}
-      />
-    );
-  }
 
   return (
     <div className="min-h-screen bg-[#F5F5F4] pb-24 md:pb-10 overflow-x-hidden">
@@ -664,21 +575,11 @@ function BolBahiApp() {
         }
         onResetDemo={handleResetDemo}
         resetting={resetting}
-        onSignOut={() => void signOut(auth)}
         lowStockCount={lowStockCount}
       />
 
       <main className="max-w-6xl mx-auto px-3 sm:px-6 pt-4 sm:pt-7">
-        {loadingShop ? (
-          <div className="bg-white border border-stone-200 rounded-2xl p-8 text-center space-y-2">
-            <p className="text-lg font-semibold text-stone-900">
-              Syncing your kirana store with Cloud Firestore...
-            </p>
-            <p className="text-sm text-stone-500">
-              Preparing 15 inventory items, 6 khata customers, and today&apos;s galla.
-            </p>
-          </div>
-        ) : activeTab === 'counter' ? (
+        {activeTab === 'counter' ? (
           <CounterTab
             draft={draft}
             catalogItems={items}
@@ -721,6 +622,7 @@ function BolBahiApp() {
             undoSecondsLeft={undoSecondsLeft}
             onUndoLastBill={handleUndoLastBill}
             recentTransactions={transactions}
+            hasGeminiKey={hasGeminiKey}
           />
         ) : activeTab === 'khata' ? (
           <KhataTab
@@ -729,11 +631,20 @@ function BolBahiApp() {
             filterCustomerId={filterCustomerId}
             onClearFilterCustomer={() => setFilterCustomerId(null)}
             onSettlePayment={async (customer, amt) => {
-              await settleCustomerUdhaarInFirestore(customer, amt);
+              const nextLocal = settleCustomerUdhaarLocal(
+                { items, customers, suppliers, transactions },
+                customer.id,
+                amt
+              );
+              applyLocalDemoState(nextLocal);
               speak(`${customer.name} ka ${amt} rupaye jama ho gaya.`);
             }}
             onAddCustomer={async (data) => {
-              await addCustomerInFirestore({ uid: user.uid, ...data });
+              const nextLocal = addCustomerLocal(
+                { items, customers, suppliers, transactions },
+                data
+              );
+              applyLocalDemoState(nextLocal);
               speak(`${data.name} customer list mein save ho gaye.`);
             }}
           />
@@ -743,7 +654,12 @@ function BolBahiApp() {
             items={items}
             suppliers={suppliers}
             onQuickRestock={async (item, qty) => {
-              await restockItemInFirestore(item, qty);
+              const nextLocal = restockItemLocal(
+                { items, customers, suppliers, transactions },
+                item.id,
+                qty
+              );
+              applyLocalDemoState(nextLocal);
               speak(`${item.name} mein ${qty} ${item.unit} stock add ho gaya.`);
             }}
           />

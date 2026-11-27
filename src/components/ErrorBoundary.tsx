@@ -13,21 +13,10 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
   }
 
   static getDerivedStateFromError(error: Error): State {
-    let display = error.message || 'An unexpected error occurred.';
-    try {
-      const parsed = JSON.parse(error.message) as { error?: string; operationType?: string; path?: string };
-      if (parsed.error) {
-        if (parsed.error.includes('Quota exceeded')) {
-          display =
-            'Firestore daily free-tier quota exceeded. Quota resets tomorrow — see Firebase Console for details.';
-        } else {
-          display = `Database ${parsed.operationType ?? 'operation'} failed on ${parsed.path ?? 'collection'}: ${parsed.error}`;
-        }
-      }
-    } catch {
-      // Plain error string
-    }
-    return { hasError: true, message: display };
+    return {
+      hasError: true,
+      message: error.message || 'An unexpected error occurred.',
+    };
   }
 
   render() {

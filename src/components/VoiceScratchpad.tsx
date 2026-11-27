@@ -11,6 +11,7 @@ interface VoiceScratchpadProps {
   onReplaySpoken: () => void;
   parserMode: ParserMode;
   onParserModeChange: (mode: ParserMode) => void;
+  hasGeminiKey?: boolean | null;
   hasActiveDraft: boolean;
   hasLowStockAlert?: boolean;
   hasActiveRestockDraft?: boolean;
@@ -45,6 +46,7 @@ export function VoiceScratchpad({
   onReplaySpoken,
   parserMode,
   onParserModeChange,
+  hasGeminiKey = null,
   hasActiveDraft,
   hasLowStockAlert = false,
   hasActiveRestockDraft = false,
@@ -225,6 +227,18 @@ export function VoiceScratchpad({
           </label>
         </div>
       </div>
+
+      {hasGeminiKey === false && parserMode === 'gemini' && (
+        <p
+          role="status"
+          data-testid="gemini-key-notice"
+          className="text-xs sm:text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2"
+        >
+          <span className="font-semibold">GEMINI_API_KEY not set</span> — running with Offline
+          Local parser and browser voice. Add a key in <code className="font-mono">.env</code> to
+          enable Gemini Flash-Lite.
+        </p>
+      )}
 
       {/* Primary Input + 64x64 Tap-to-Speak Mic */}
       <div className="flex flex-col sm:flex-row gap-3 items-stretch">

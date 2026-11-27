@@ -4,9 +4,31 @@ import { toDevanagariHindiSpeech, toHinglishSpeech } from '../../shared/hindiSpe
 const TTS_MODELS = ['gemini-3.8-flash-lite-tts', 'gemini-2.5-flash-preview-tts'];
 const TTS_TIMEOUT_MS = 6500;
 const MAX_CACHE_ENTRIES = 40;
+const QUOTA_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes before retrying Gemini TTS after 429
 
 let cachedAi: GoogleGenAI | null = null;
+let quotaCooldownUntilMs = 0;
 const audioCache = new Map<string, { audioBase64: string; mimeType: string }>();
+
+export type TtsSynthesisResult =
+  | {
+      audioBase64: string;
+      mimeType: string;
+      spokenText: string;
+      modelUsed?: string;
+      fallback?: undefined;
+    }
+  | {
+      fallback: 'browser';
+      reason: 'no_api_key' | 'quota_exceeded' | 'unavailable';
+      spokenText: string;
+      retryAfterMs?: number;
+    };
+
+function isQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /429|RESOURCE_EXHAUSTED|quota|rate[- ]limit/i.test(msg);
+}
 
 function getAiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -78,19 +100,14 @@ function ensurePlayableWav(base64Data: string, rawMimeType?: string): { audioBas
 export async function synthesizeKiranaSpeech(params: {
   text: string;
   lang: 'en-IN' | 'hi-IN';
-}): Promise<{ audioBase64: string; mimeType: string; spokenText: string; modelUsed?: string } | null> {
-  const ai = getAiClient();
-  if (!ai) {
-    return null;
-  }
-
+}): Promise<TtsSynthesisResult> {
   const spokenText =
     params.lang === 'hi-IN'
       ? toDevanagariHindiSpeech(params.text)
       : toHinglishSpeech(params.text);
 
   if (!spokenText) {
-    return null;
+    return { fallback: 'browser', reason: 'unavailable', spokenText: '' };
   }
 
   const cacheKey = `${params.lang}::${spokenText}`;
@@ -99,7 +116,22 @@ export async function synthesizeKiranaSpeech(params: {
     return { ...cached, spokenText };
   }
 
-  let lastErr: unknown = null;
+  const ai = getAiClient();
+  if (!ai) {
+    return { fallback: 'browser', reason: 'no_api_key', spokenText };
+  }
+
+  const now = Date.now();
+  if (now < quotaCooldownUntilMs) {
+    return {
+      fallback: 'browser',
+      reason: 'quota_exceeded',
+      spokenText,
+      retryAfterMs: quotaCooldownUntilMs - now,
+    };
+  }
+
+  let sawQuotaError = false;
 
   for (const model of TTS_MODELS) {
     try {
@@ -140,9 +172,25 @@ export async function synthesizeKiranaSpeech(params: {
 
       return { ...playable, spokenText, modelUsed: model };
     } catch (err) {
-      lastErr = err;
+      if (isQuotaError(err)) {
+        sawQuotaError = true;
+      }
     }
   }
 
-  throw lastErr ?? new Error('No TTS model returned audio');
+  if (sawQuotaError) {
+    quotaCooldownUntilMs = Date.now() + QUOTA_COOLDOWN_MS;
+    return {
+      fallback: 'browser',
+      reason: 'quota_exceeded',
+      spokenText,
+      retryAfterMs: QUOTA_COOLDOWN_MS,
+    };
+  }
+
+  return {
+    fallback: 'browser',
+    reason: 'unavailable',
+    spokenText,
+  };
 }

@@ -60,7 +60,7 @@ export function DraftBillCard({
           </p>
           <p className="text-sm text-stone-600">
             Say <span className="font-semibold text-stone-900">&ldquo;Haan, bhej do&rdquo;</span> or
-            tap Confirm to save to Firestore
+            tap Confirm to save bill
           </p>
         </div>
         <button
@@ -391,7 +391,7 @@ export function DraftBillCard({
             className="flex-1 min-h-[54px] px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-stone-300 disabled:text-stone-500 text-white font-bold text-base inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
             <CheckCircle2 className="w-5 h-5" />
-            <span>{confirming ? 'Saving to Firestore...' : 'Confirm & Send WhatsApp'}</span>
+            <span>{confirming ? 'Saving bill...' : 'Confirm & Send WhatsApp'}</span>
           </button>
 
           <button

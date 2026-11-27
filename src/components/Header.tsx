@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LogOut, RotateCcw, Store, Volume2, VolumeX } from 'lucide-react';
+import { RotateCcw, Store, Volume2, VolumeX } from 'lucide-react';
 
 export type ActiveTab = 'counter' | 'khata' | 'galla';
 export type ParserBadgeLabel =
@@ -16,7 +16,6 @@ interface HeaderProps {
   onToggleMute: () => void;
   onResetDemo: () => Promise<void>;
   resetting: boolean;
-  onSignOut: () => void;
   lowStockCount: number;
 }
 
@@ -28,7 +27,6 @@ export function Header({
   onToggleMute,
   onResetDemo,
   resetting,
-  onSignOut,
   lowStockCount,
 }: HeaderProps) {
   const [confirmingReset, setConfirmingReset] = useState(false);
@@ -155,15 +153,6 @@ export function Header({
             </span>
           </button>
 
-          <button
-            type="button"
-            onClick={onSignOut}
-            aria-label="Sign out"
-            title="Sign out"
-            className="min-h-[40px] min-w-[40px] sm:min-h-[44px] sm:min-w-[44px] rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-600 hover:text-stone-900 inline-flex items-center justify-center transition-colors cursor-pointer shrink-0"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
         </div>
       </div>
 

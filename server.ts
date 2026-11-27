@@ -250,16 +250,9 @@ app.post('/api/tts', async (req, res) => {
     const lang: 'en-IN' | 'hi-IN' = body.lang === 'hi-IN' ? 'hi-IN' : 'en-IN';
     const result = await synthesizeKiranaSpeech({ text, lang });
 
-    if (!result) {
-      res.status(503).json({ error: 'TTS unavailable' });
-      return;
-    }
-
     res.json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn('[BolBahi] /api/tts error:', message);
-    res.status(503).json({ error: 'TTS synthesis failed' });
+  } catch {
+    res.json({ fallback: 'browser', reason: 'unavailable' });
   }
 });
 

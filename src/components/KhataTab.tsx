@@ -258,7 +258,7 @@ export function KhataTab({
             onSubmit={(e) => void handleCreateCustomer(e)}
             className="rounded-xl border border-stone-200 bg-stone-50 p-4 space-y-3"
           >
-            <h2 className="text-base font-bold text-stone-900">Save New Customer to Firestore</h2>
+            <h2 className="text-base font-bold text-stone-900">Add New Customer</h2>
             {addError && (
               <p role="alert" className="text-sm font-medium text-red-700">
                 {addError}
@@ -369,7 +369,7 @@ export function KhataTab({
                 Saved Customer Directory ({directoryCustomers.length})
               </h2>
               <p className="text-sm text-stone-500">
-                All customers stored in Firestore with phone numbers and voice aliases
+                All saved customers with phone numbers and voice aliases
               </p>
             </div>
           </div>

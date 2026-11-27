@@ -152,6 +152,18 @@ export interface TransactionDoc {
   createdAtMs?: number;
 }
 
+export interface UndoBillPayload {
+  transactionId: string;
+  customerId: string;
+  prevUdhaarBalance: number;
+  prevLastPaymentDaysAgo: number;
+  stockRestores: Array<{
+    itemId: string;
+    prevStock: number;
+  }>;
+  createdItemIds: string[];
+}
+
 export interface ExtractedItem {
   rawName: string;
   matchedSlug: string | null;

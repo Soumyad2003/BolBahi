@@ -47,6 +47,7 @@ let activeAudio: HTMLAudioElement | null = null;
 let activeAbortController: AbortController | null = null;
 let speakTimer: number | null = null;
 let speakRequestId = 0;
+let ttsServerCooldownUntilMs = 0;
 
 if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
   const loadVoices = () => {
@@ -198,7 +199,7 @@ export function speakHinglish(
 
   const requestId = speakRequestId;
 
-  if (!preferGeminiTts) {
+  if (!preferGeminiTts || Date.now() < ttsServerCooldownUntilMs) {
     speakWithBrowserSynthesis(text, lang);
     return;
   }
@@ -216,10 +217,26 @@ export function speakHinglish(
       });
 
       if (requestId !== speakRequestId) return;
-      if (!res.ok) throw new Error(`TTS HTTP ${res.status}`);
+      if (!res.ok) {
+        speakWithBrowserSynthesis(text, lang);
+        return;
+      }
 
-      const data = (await res.json()) as { audioBase64?: string; mimeType?: string };
-      if (requestId !== speakRequestId || !data.audioBase64) return;
+      const data = (await res.json()) as {
+        audioBase64?: string;
+        mimeType?: string;
+        fallback?: 'browser';
+        retryAfterMs?: number;
+      };
+      if (requestId !== speakRequestId) return;
+
+      if (data.fallback === 'browser' || !data.audioBase64) {
+        if (typeof data.retryAfterMs === 'number' && data.retryAfterMs > 0) {
+          ttsServerCooldownUntilMs = Date.now() + data.retryAfterMs;
+        }
+        speakWithBrowserSynthesis(text, lang);
+        return;
+      }
 
       const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
       activeAudio = audio;
@@ -236,10 +253,8 @@ export function speakHinglish(
       };
 
       await audio.play();
-    } catch (err) {
+    } catch {
       if (controller.signal.aborted || requestId !== speakRequestId) return;
-      // Seamless fallback to local browser Hindi/Hinglish speech synthesis
-      console.warn('[BolBahi] Falling back to browser TTS:', err instanceof Error ? err.message : err);
       speakWithBrowserSynthesis(text, lang);
     } finally {
       if (activeAbortController === controller) {
