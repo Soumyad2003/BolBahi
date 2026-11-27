@@ -815,6 +815,95 @@ test('Instant Demo localDemoStore handles billing, low-stock alerts, undo, udhaa
   assert.equal(withNewCust.customers[6].name, 'Anil Gupta');
 });
 
+test('Wispr Flow multi-line bulleted and numbered lists parse cleanly into items, customer, and payments', () => {
+  const fullCatalog: ItemDoc[] = [
+    ...MOCK_ITEMS,
+    {
+      id: 'u_aloo',
+      ownerId: 'u',
+      slug: 'aloo',
+      name: 'Potato / Aloo',
+      aliases: ['aloo', 'alu', 'batata', 'potato'],
+      unit: 'kg',
+      price: 32,
+      gstPercent: 0,
+      stock: 22,
+      reorderThreshold: 8,
+      supplierId: 'u_agarwal',
+    },
+    {
+      id: 'u_parle',
+      ownerId: 'u',
+      slug: 'parle',
+      name: 'Parle-G Biscuit',
+      aliases: ['parle', 'parle g', 'parle-g', 'biscuit'],
+      unit: 'pkt',
+      price: 10,
+      gstPercent: 18,
+      stock: 30,
+      reorderThreshold: 10,
+      supplierId: 'u_metro',
+    },
+  ];
+
+  // Exact reported Wispr Flow bulleted dictation
+  const wisprInput = `Rajesh Sharma ko:\n- 5 kg aata\n- 3 liter tel\n- 2 kg aloo\n- 300 cash`;
+  const parsed = parseWithLocalFallback({
+    utterance: wisprInput,
+    activeDraft: null,
+    items: fullCatalog,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(parsed.intent, 'LOG_SALE');
+  assert.equal(parsed.customerQuery, 'Rajesh Sharma');
+  assert.equal(parsed.cashPaid, 300);
+  assert.equal(parsed.items.length, 3);
+  assert.deepEqual(
+    parsed.items.map((i) => [i.matchedSlug, i.qty]),
+    [
+      ['atta', 5],
+      ['tel', 3],
+      ['aloo', 2],
+    ]
+  );
+
+  const draft = buildNewDraftBill({
+    customerQuery: parsed.customerQuery,
+    extractedItems: parsed.items,
+    cashPaid: parsed.cashPaid,
+    upiPaid: parsed.upiPaid,
+    isUdhaar: parsed.isUdhaar,
+    transcript: wisprInput,
+    parserSource: 'fallback',
+    catalog: fullCatalog,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(draft.customerId, 'u_rajesh');
+  assert.equal(draft.total, 804); // 5*52 (260) + 3*160 (480) + 2*32 (64)
+  assert.equal(draft.cashPaid, 300);
+  assert.equal(draft.newUdhaar, 504);
+
+  // Colon header without "ko", numbered list, decimal qty, attached unit, and hyphenated Parle-G
+  const numberedInput = `Rajesh Sharma:\n1. 1.5kg chawal\n2. 2 Parle-G\n3. 100 upi`;
+  const parsed2 = parseWithLocalFallback({
+    utterance: numberedInput,
+    activeDraft: null,
+    items: fullCatalog,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(parsed2.intent, 'LOG_SALE');
+  assert.equal(parsed2.customerQuery, 'Rajesh Sharma');
+  assert.equal(parsed2.upiPaid, 100);
+  assert.equal(parsed2.items.length, 2);
+  assert.deepEqual(
+    parsed2.items.map((i) => [i.matchedSlug, i.qty]),
+    [
+      ['chawal', 1.5],
+      ['parle', 2],
+    ]
+  );
+});
+
 
 
 

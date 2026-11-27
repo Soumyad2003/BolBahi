@@ -201,9 +201,25 @@ export function transliterateDevanagariToLatin(input: string): string {
 export function normalizeHinglishNumbers(input: string): string {
   let text = transliterateDevanagariToLatin(input)
     .toLowerCase()
+    // Convert line breaks (with optional bullets like "-", "*", "•", "–", "—" or numbered lists like "1." / "1)") into comma separators
+    .replace(/\r?\n+\s*(?:[-*•–—]+\s*|\d+[.)]\s+)?/g, ' , ')
+    // Strip any leading bullet or list marker at start of input
+    .replace(/^\s*(?:[-*•–—]+\s*|\d+[.)]\s+)/, '')
+    // Convert colons and semicolons (e.g. "Rajesh Sharma ko:") into comma separators
+    .replace(/[:;]+/g, ' , ')
+    // Convert spaced dash/bullet separators (" - ", " • ", " — ") into commas while preserving intra-word hyphens like "parle-g"
+    .replace(/\s+[-*•–—]+\s+/g, ' , ')
+    // Separate attached metric units like "5kg" -> "5 kg", "2l" -> "2 l"
+    .replace(
+      /\b(\d+(?:\.\d+)?)(kg|kgs|kilo|g|gm|gms|l|ltr|litre|liter|litres|liters|ml|pkt|pkts|pc|pcs)\b/gi,
+      '$1 $2'
+    )
     .replace(/₹/g, ' rs ')
     .replace(/,/g, ' , ')
-    .replace(/[.!?।]+/g, ' ')
+    // Preserve decimal points between digits (e.g. "1.5"), strip other sentence punctuation
+    .replace(/(?<!\d)\.(?!\d)|[!?।]+/g, ' ')
+    .replace(/(?:\s*,\s*)+/g, ' , ')
+    .replace(/^\s*,\s*|\s*,\s*$/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 

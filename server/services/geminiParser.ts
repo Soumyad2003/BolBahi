@@ -117,7 +117,7 @@ async function callGeminiModel(
         systemInstruction: SYSTEM_INSTRUCTION,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        maxOutputTokens: 280,
+        maxOutputTokens: 640,
         thinkingConfig: {
           thinkingLevel,
         },

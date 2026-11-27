@@ -152,7 +152,7 @@ function parseRestockItems(
 
   const chunks = body
     .split(/\s*(?:,|\baur\b|\band\b|\bplus\b)\s*/i)
-    .map((c) => c.trim())
+    .map((c) => c.replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '').trim())
     .filter((c) => c.length >= 2);
 
   const results: ExtractedItem[] = [];
@@ -260,10 +260,26 @@ function parseEditItems(normalized: string, catalog: ItemDoc[], activeDraft: Dra
   return parseSaleItems(normalized, catalog);
 }
 
-function parseSaleItems(normalized: string, catalog: ItemDoc[]): ExtractedItem[] {
-  // Strip leading customer clause and trailing payment clause
+function parseSaleItems(
+  normalized: string,
+  catalog: ItemDoc[],
+  customerQuery: string | null = null
+): ExtractedItem[] {
+  // Strip leading customer clause (e.g. "Rajesh Sharma ko," or "Rajesh Sharma ke khate mein") and trailing payment clause
   let body = normalized
-    .replace(/^[a-z\s]{2,40}?\b(?:ke\s+khate\s+mein|ke\s+khate\s+me|ke\s+khata\s+mein|ko)\b/i, ' ')
+    .replace(/^[a-z\s]{2,40}?\b(?:ke\s+khate\s+mein|ke\s+khate\s+me|ke\s+khata\s+mein|ko)\b\s*,?/i, ' ');
+
+  if (customerQuery) {
+    const escapedCustomer = customerQuery
+      .toLowerCase()
+      .trim()
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (escapedCustomer.length >= 2) {
+      body = body.replace(new RegExp(`^\\s*${escapedCustomer}\\s*,`, 'i'), ' ');
+    }
+  }
+
+  body = body
     .replace(PAYMENT_STRIP_REGEX, ' , ')
     .replace(
       /\b(baaki|baki|udhaar|udhar|likho|likh\s+do|dena|de\s+do|chahiye|bill\s+banao|kar\s+do|hai|hain|mein|me|ke|ka|ki|khate|khata|diye|diya|kiya|kiye|mila|mile)\b/gi,
@@ -281,7 +297,7 @@ function parseSaleItems(normalized: string, catalog: ItemDoc[]): ExtractedItem[]
   // Split by commas or "aur" / "and"
   const chunks = body
     .split(/\s*(?:,|\baur\b|\band\b|\bplus\b)\s*/i)
-    .map((c) => c.trim())
+    .map((c) => c.replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '').trim())
     .filter((c) => c.length >= 2);
 
   const items: ExtractedItem[] = [];
@@ -372,7 +388,7 @@ export function parseWithLocalFallback(params: {
   }
 
   // 3. New Customer Sale
-  const parsedItems = parseSaleItems(normalized, params.items);
+  const parsedItems = parseSaleItems(normalized, params.items, customerQuery);
   if (parsedItems.length === 0 && cashPaid === null && upiPaid === null) {
     return {
       intent: 'NOISE',
