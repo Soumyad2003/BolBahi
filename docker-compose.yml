@@ -1,6 +1,8 @@
 services:
   bolbahi:
-    build: .
+    build:
+      context: .
+      dockerfile: app.dockerfile
     ports:
       - "3000:3000"
     environment:
