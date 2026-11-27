@@ -12,6 +12,8 @@ interface VoiceScratchpadProps {
   parserMode: ParserMode;
   onParserModeChange: (mode: ParserMode) => void;
   hasActiveDraft: boolean;
+  hasLowStockAlert?: boolean;
+  hasActiveRestockDraft?: boolean;
 }
 
 interface SpeechRecognitionEventLike {
@@ -44,6 +46,8 @@ export function VoiceScratchpad({
   parserMode,
   onParserModeChange,
   hasActiveDraft,
+  hasLowStockAlert = false,
+  hasActiveRestockDraft = false,
 }: VoiceScratchpadProps) {
   const [text, setText] = useState('');
   const [autoSubmit, setAutoSubmit] = useState(false);
@@ -242,8 +246,12 @@ export function VoiceScratchpad({
             }}
             placeholder={
               hasActiveDraft
-                ? 'Edit ("Tel 155 rupaye kar do") or confirm ("Haan, bhej do")...'
-                : 'Dictate in Hinglish: "Rajesh Sharma ko 5 kilo atta, 300 cash..."'
+                ? 'Edit ("Tel 155 rupaye kar do"), confirm ("Haan, bhej do"), or "Cancel kar do"...'
+                : hasActiveRestockDraft
+                  ? 'Edit restock ("Atta 25 kilo kar do", "Tel hata do") or "Cancel kar do"...'
+                  : hasLowStockAlert
+                    ? 'Say "Haan mangwa lo" or "20 kilo atta aur 10 litre tel mangwa lo"...'
+                    : 'Dictate in Hinglish: "Rajesh Sharma ko 5 kilo atta, 300 cash..."'
             }
             className="w-full min-h-[92px] rounded-xl border-2 border-stone-300 focus:border-emerald-600 focus:outline-none bg-stone-50 focus:bg-white px-3.5 py-3 text-base leading-snug text-stone-900 placeholder:text-stone-500 resize-none transition-colors"
           />

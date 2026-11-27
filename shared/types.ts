@@ -5,6 +5,8 @@ export type VoiceIntent =
   | 'LOG_SALE'
   | 'EDIT_BILL'
   | 'CONFIRM_BILL'
+  | 'CANCEL_BILL'
+  | 'ORDER_RESTOCK'
   | 'QUERY_GALLA'
   | 'QUERY_RESTOCK'
   | 'QUERY_UDHAAR'
@@ -86,6 +88,38 @@ export interface DraftBill {
   editedFields?: string[];
 }
 
+export interface LowStockAlertItem {
+  itemId: string;
+  slug: string;
+  name: string;
+  unit: string;
+  previousStock: number;
+  remainingStock: number;
+  reorderThreshold: number;
+  suggestedOrderQty: number;
+  supplierId: string;
+}
+
+export interface RestockDraftLine {
+  itemId: string;
+  slug: string;
+  name: string;
+  unit: string;
+  currentStock: number;
+  reorderThreshold: number;
+  orderQty: number;
+  supplierId: string;
+  justUpdated?: boolean;
+}
+
+export interface RestockDraft {
+  items: RestockDraftLine[];
+  sourceTranscript: string;
+  parserSource: ParserSource;
+  sentSupplierIds: string[];
+  createdAtMs: number;
+}
+
 export interface TransactionLineItem {
   itemId: string | null;
   slug: string;
@@ -124,6 +158,7 @@ export interface ExtractedItem {
   qty: number;
   unit: string | null;
   overridePrice: number | null;
+  restockAction?: 'add' | 'set' | 'remove';
 }
 
 export interface ExtractedPayload {
@@ -135,6 +170,7 @@ export interface ExtractedPayload {
   isUdhaar: boolean;
   confidence: number;
   ambiguityNote: string | null;
+  useAlertDefaults?: boolean;
 }
 
 export interface TodayStats {
@@ -148,6 +184,8 @@ export interface TodayStats {
 export interface VoiceParseRequest {
   utterance: string;
   activeDraft: DraftBill | null;
+  activeRestockDraft?: RestockDraft | null;
+  lowStockAlertItems?: LowStockAlertItem[];
   items: ItemDoc[];
   customers: CustomerDoc[];
   suppliers: SupplierDoc[];
@@ -160,6 +198,8 @@ export interface VoiceParseResponse {
   parserSource: ParserSource;
   parserLabel: 'Gemini Flash-Lite' | '0-Token Local' | 'Offline Local' | 'Offline Fallback';
   draft: DraftBill | null;
+  restockDraft?: RestockDraft | null;
+  shouldCancelRestockDraft?: boolean;
   targetTab: 'counter' | 'khata' | 'galla';
   filterCustomerId: string | null;
   spokenReply: string;

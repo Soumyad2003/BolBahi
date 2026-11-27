@@ -8,10 +8,12 @@ import type {
   CustomerDoc,
   DraftBill,
   ItemDoc,
+  LowStockAlertItem,
   SupplierDoc,
   TransactionDoc,
   TransactionLineItem,
 } from '../../shared/types';
+import { computeLowStockAlertsAfterSale } from '../../shared/restockMath';
 import { db, handleFirestoreError, OperationType } from './config';
 import { getTodayDateKey, makeDocId } from './seedData';
 
@@ -40,6 +42,7 @@ export async function confirmDraftBillInFirestore(params: {
 }): Promise<{
   transaction: TransactionDoc;
   undoPayload: UndoBillPayload;
+  lowStockAlerts: LowStockAlertItem[];
 }> {
   const { uid, draft, catalogItems, customers, suppliers } = params;
 
@@ -62,6 +65,7 @@ export async function confirmDraftBillInFirestore(params: {
 
   // Build normalized transaction line items & decrement stock (or save new catalog item)
   const txItems: TransactionLineItem[] = [];
+  const stockDeductionById = new Map<string, number>();
 
   for (const row of draft.items.slice(0, 30)) {
     let resolvedItemId = row.itemId;
@@ -87,18 +91,8 @@ export async function confirmDraftBillInFirestore(params: {
         updatedAt: serverTimestamp(),
       });
     } else if (row.itemId) {
-      const catalogItem = catalogItems.find((ci) => ci.id === row.itemId);
-      if (catalogItem) {
-        stockRestores.push({
-          itemId: catalogItem.id,
-          prevStock: catalogItem.stock,
-        });
-        const nextStock = Math.max(0, roundMoney(catalogItem.stock - row.qty));
-        batch.update(doc(db, 'items', catalogItem.id), {
-          stock: nextStock,
-          updatedAt: serverTimestamp(),
-        });
-      }
+      const prevDeducted = stockDeductionById.get(row.itemId) ?? 0;
+      stockDeductionById.set(row.itemId, roundMoney(prevDeducted + row.qty));
     }
 
     txItems.push({
@@ -113,6 +107,26 @@ export async function confirmDraftBillInFirestore(params: {
       gstIncluded: roundMoney(row.gstIncluded),
     });
   }
+
+  // Apply aggregated stock updates once per catalog item
+  for (const [itemId, totalQty] of stockDeductionById.entries()) {
+    const catalogItem = catalogItems.find((ci) => ci.id === itemId);
+    if (!catalogItem) continue;
+    stockRestores.push({
+      itemId: catalogItem.id,
+      prevStock: catalogItem.stock,
+    });
+    const nextStock = Math.max(0, roundMoney(catalogItem.stock - totalQty));
+    batch.update(doc(db, 'items', catalogItem.id), {
+      stock: nextStock,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  const lowStockAlerts = computeLowStockAlertsAfterSale(
+    draft.items.slice(0, 30).map((row) => ({ itemId: row.itemId, qty: row.qty })),
+    catalogItems
+  );
 
   // Update customer's udhaar balance and last payment days
   const nextUdhaar = Math.max(0, roundMoney(customer.udhaarBalance + draft.newUdhaar));
@@ -169,6 +183,7 @@ export async function confirmDraftBillInFirestore(params: {
       stockRestores,
       createdItemIds,
     },
+    lowStockAlerts,
   };
 }
 
@@ -225,6 +240,26 @@ export async function restockItemInFirestore(item: ItemDoc, addedQty: number): P
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `items/${item.id}`);
+  }
+}
+
+export async function restockItemsBatchInFirestore(
+  entries: Array<{ item: ItemDoc; addedQty: number }>
+): Promise<void> {
+  if (entries.length === 0) return;
+  const batch = writeBatch(db);
+  for (const { item, addedQty } of entries) {
+    if (addedQty <= 0) continue;
+    const nextStock = Math.min(100000, roundMoney(item.stock + addedQty));
+    batch.update(doc(db, 'items', item.id), {
+      stock: nextStock,
+      updatedAt: serverTimestamp(),
+    });
+  }
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, 'items/restock-batch');
   }
 }
 

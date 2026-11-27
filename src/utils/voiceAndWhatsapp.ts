@@ -1,4 +1,10 @@
-import type { CustomerDoc, ItemDoc, SupplierDoc, TransactionDoc } from '../../shared/types';
+import type {
+  CustomerDoc,
+  ItemDoc,
+  RestockDraftLine,
+  SupplierDoc,
+  TransactionDoc,
+} from '../../shared/types';
 import { toDevanagariHindiSpeech, toHinglishSpeech } from '../../shared/hindiSpeech';
 
 export const DEMO_QUICK_SPEAK_PILLS = [
@@ -300,6 +306,26 @@ export function buildWhatsappRestockOrderUrl(supplier: SupplierDoc, lowItems: It
   ];
 
   const phone = sanitizePhone(supplier.phone);
+  return phone.length === 10
+    ? `https://wa.me/91${phone}?text=${encodeURIComponent(lines.join('\n'))}`
+    : `https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`;
+}
+
+export function buildWhatsappRestockDraftUrl(
+  supplier: SupplierDoc | null,
+  draftLines: RestockDraftLine[]
+): string {
+  const greeting = supplier ? `Namaste ${supplier.name},` : 'Namaste,';
+  const lines = [
+    greeting,
+    `BolBahi Kirana se restock order:`,
+    ...draftLines.map(
+      (it) => `- ${it.name}: ${it.orderQty} ${it.unit} (Current stock: ${it.currentStock} ${it.unit})`
+    ),
+    `Please confirm delivery timing. Dhanyavaad!`,
+  ];
+
+  const phone = supplier ? sanitizePhone(supplier.phone) : '';
   return phone.length === 10
     ? `https://wa.me/91${phone}?text=${encodeURIComponent(lines.join('\n'))}`
     : `https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`;

@@ -5,12 +5,19 @@ import type {
   CustomerDoc,
   DraftBill,
   ItemDoc,
+  LowStockAlertItem,
   ParserMode,
+  RestockDraft,
   SupplierDoc,
   TodayStats,
   TransactionDoc,
   VoiceParseResponse,
 } from '../shared/types';
+import {
+  buildPostConfirmLowStockSpeech,
+  buildRestockDraftFromAlerts,
+  buildRestockSpokenSummary,
+} from '../shared/restockMath';
 import {
   auth,
   db,
@@ -23,6 +30,7 @@ import {
   addCustomerInFirestore,
   confirmDraftBillInFirestore,
   restockItemInFirestore,
+  restockItemsBatchInFirestore,
   settleCustomerUdhaarInFirestore,
   undoTransactionInFirestore,
   type UndoBillPayload,
@@ -80,6 +88,9 @@ function BolBahiApp() {
   }, []);
 
   const [draft, setDraft] = useState<DraftBill | null>(null);
+  const [lowStockAlerts, setLowStockAlerts] = useState<LowStockAlertItem[]>([]);
+  const [restockDraft, setRestockDraft] = useState<RestockDraft | null>(null);
+  const [receivingGroupKey, setReceivingGroupKey] = useState<string | null>(null);
   const [processingVoice, setProcessingVoice] = useState(false);
   const [confirmingBill, setConfirmingBill] = useState(false);
   const [warningBanner, setWarningBanner] = useState<string | null>(null);
@@ -104,6 +115,8 @@ function BolBahiApp() {
         setSuppliers([]);
         setTransactions([]);
         setDraft(null);
+        setLowStockAlerts([]);
+        setRestockDraft(null);
         setLastSavedTx(null);
         setLoadingShop(false);
       }
@@ -300,7 +313,11 @@ function BolBahiApp() {
       setConfirmingBill(true);
       setWarningBanner(null);
       try {
-        const { transaction, undoPayload: nextUndo } = await confirmDraftBillInFirestore({
+        const {
+          transaction,
+          undoPayload: nextUndo,
+          lowStockAlerts: nextAlerts,
+        } = await confirmDraftBillInFirestore({
           uid: user.uid,
           draft: target,
           catalogItems: items,
@@ -311,7 +328,14 @@ function BolBahiApp() {
         setLastSavedTx(transaction);
         setUndoPayload(nextUndo);
         setUndoSecondsLeft(5);
-        speak('Bill save ho gaya. WhatsApp receipt ready hai.');
+        setLowStockAlerts(nextAlerts);
+        if (nextAlerts.length > 0) {
+          speak(
+            `Bill save ho gaya. ${buildPostConfirmLowStockSpeech(nextAlerts)}`
+          );
+        } else {
+          speak('Bill save ho gaya. WhatsApp receipt ready hai.');
+        }
       } catch (err) {
         setWarningBanner(err instanceof Error ? err.message : 'Failed to save bill.');
       } finally {
@@ -334,6 +358,8 @@ function BolBahiApp() {
           body: JSON.stringify({
             utterance,
             activeDraft: draft,
+            activeRestockDraft: restockDraft,
+            lowStockAlertItems: lowStockAlerts,
             items,
             customers,
             suppliers,
@@ -347,7 +373,13 @@ function BolBahiApp() {
         }
 
         const result = (await response.json()) as VoiceParseResponse;
-        setParserLabel(result.parserLabel);
+        if (parserMode === 'offline') {
+          setParserLabel('Offline Local');
+        } else if (result.parserSource === 'fallback') {
+          setParserLabel('Offline Fallback');
+        } else {
+          setParserLabel('Gemini Flash-Lite');
+        }
 
         if (result.bannerType === 'warning' && result.bannerMessage) {
           setWarningBanner(result.bannerMessage);
@@ -356,6 +388,17 @@ function BolBahiApp() {
         if (result.shouldConfirmActiveDraft && draft) {
           await handleConfirmDraft(draft);
           return;
+        }
+
+        if (result.shouldCancelRestockDraft) {
+          setRestockDraft(null);
+        }
+
+        if (result.intent === 'ORDER_RESTOCK' && result.restockDraft !== undefined) {
+          setRestockDraft(result.restockDraft);
+          if (result.restockDraft) {
+            setLowStockAlerts([]);
+          }
         }
 
         if (result.draft !== undefined) {
@@ -383,7 +426,19 @@ function BolBahiApp() {
         setProcessingVoice(false);
       }
     },
-    [draft, items, customers, suppliers, todayStats, parserMode, activeTab, handleConfirmDraft, speak]
+    [
+      draft,
+      restockDraft,
+      lowStockAlerts,
+      items,
+      customers,
+      suppliers,
+      todayStats,
+      parserMode,
+      activeTab,
+      handleConfirmDraft,
+      speak,
+    ]
   );
 
   const handleUndoLastBill = async () => {
@@ -392,8 +447,94 @@ function BolBahiApp() {
     setUndoPayload(null);
     setUndoSecondsLeft(0);
     setLastSavedTx(null);
+    setLowStockAlerts([]);
     await undoTransactionInFirestore(payload);
     speak('Pichla bill undo ho gaya.');
+  };
+
+  const handleDraftRestockFromAlerts = () => {
+    if (lowStockAlerts.length === 0) return;
+    const nextRestock = buildRestockDraftFromAlerts(
+      lowStockAlerts,
+      'Low stock alert order',
+      'pre-router'
+    );
+    if (!nextRestock) return;
+    setRestockDraft(nextRestock);
+    setLowStockAlerts([]);
+    speak(buildRestockSpokenSummary(nextRestock, false));
+  };
+
+  const handleUpdateRestockOrderQty = (itemId: string, nextQty: number) => {
+    setRestockDraft((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        items: prev.items.map((it) =>
+          it.itemId === itemId ? { ...it, orderQty: Math.max(1, nextQty), justUpdated: false } : it
+        ),
+      };
+    });
+  };
+
+  const handleRemoveRestockItem = (itemId: string) => {
+    setRestockDraft((prev) => {
+      if (!prev) return null;
+      const remaining = prev.items.filter((it) => it.itemId !== itemId);
+      return remaining.length > 0 ? { ...prev, items: remaining } : null;
+    });
+  };
+
+  const handleAssignRestockSupplier = (itemId: string, supplierId: string) => {
+    setRestockDraft((prev) => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        items: prev.items.map((it) => (it.itemId === itemId ? { ...it, supplierId } : it)),
+      };
+    });
+  };
+
+  const handleMarkRestockSupplierSent = (groupKey: string) => {
+    setRestockDraft((prev) => {
+      if (!prev) return null;
+      if (prev.sentSupplierIds.includes(groupKey)) return prev;
+      return {
+        ...prev,
+        sentSupplierIds: [...prev.sentSupplierIds, groupKey],
+      };
+    });
+  };
+
+  const handleReceiveRestockSupplierGroup = async (groupKey: string, itemIds: string[]) => {
+    if (!restockDraft || receivingGroupKey) return;
+    const linesToReceive = restockDraft.items.filter((l) => itemIds.includes(l.itemId));
+    const entries = linesToReceive
+      .map((line) => {
+        const catalogItem = items.find((ci) => ci.id === line.itemId);
+        return catalogItem ? { item: catalogItem, addedQty: line.orderQty } : null;
+      })
+      .filter((entry): entry is { item: ItemDoc; addedQty: number } => Boolean(entry));
+
+    if (entries.length === 0) return;
+
+    setReceivingGroupKey(groupKey);
+    try {
+      await restockItemsBatchInFirestore(entries);
+      setRestockDraft((prev) => {
+        if (!prev) return null;
+        const remaining = prev.items.filter((l) => !itemIds.includes(l.itemId));
+        return remaining.length > 0 ? { ...prev, items: remaining } : null;
+      });
+      setLowStockAlerts((prev) => prev.filter((a) => !itemIds.includes(a.itemId)));
+      speak(
+        `${entries.map((e) => `${e.addedQty} ${e.item.unit} ${e.item.name}`).join(', ')} stock mein add ho gaya.`
+      );
+    } catch (err) {
+      setWarningBanner(err instanceof Error ? err.message : 'Failed to update stock.');
+    } finally {
+      setReceivingGroupKey(null);
+    }
   };
 
   const handleSelectAmbiguousCustomer = (customerId: string) => {
@@ -469,11 +610,14 @@ function BolBahiApp() {
     setResetting(true);
     try {
       setDraft(null);
+      setLowStockAlerts([]);
+      setRestockDraft(null);
       setLastSavedTx(null);
       setUndoPayload(null);
       setUndoSecondsLeft(0);
       setWarningBanner(null);
       setFilterCustomerId(null);
+      setParserLabel(parserMode === 'offline' ? 'Offline Local' : 'Gemini Flash-Lite');
       await resetShopData(user.uid);
       speak('Demo data reset ho gaya.');
     } finally {
@@ -537,7 +681,12 @@ function BolBahiApp() {
         ) : activeTab === 'counter' ? (
           <CounterTab
             draft={draft}
+            catalogItems={items}
             customers={customers}
+            suppliers={suppliers}
+            lowStockAlerts={lowStockAlerts}
+            restockDraft={restockDraft}
+            receivingGroupKey={receivingGroupKey}
             processingVoice={processingVoice}
             confirmingBill={confirmingBill}
             warningBanner={warningBanner}
@@ -556,6 +705,17 @@ function BolBahiApp() {
               setDraft(null);
               setWarningBanner(null);
               speak('Draft cancel kar diya.');
+            }}
+            onDraftRestockFromAlerts={handleDraftRestockFromAlerts}
+            onDismissLowStockAlerts={() => setLowStockAlerts([])}
+            onUpdateRestockOrderQty={handleUpdateRestockOrderQty}
+            onRemoveRestockItem={handleRemoveRestockItem}
+            onAssignRestockSupplier={handleAssignRestockSupplier}
+            onMarkRestockSupplierSent={handleMarkRestockSupplierSent}
+            onReceiveRestockSupplierGroup={handleReceiveRestockSupplierGroup}
+            onCancelRestockDraft={() => {
+              setRestockDraft(null);
+              speak('Restock order draft cancel kar diya.');
             }}
             lastSavedTx={lastSavedTx}
             undoSecondsLeft={undoSecondsLeft}

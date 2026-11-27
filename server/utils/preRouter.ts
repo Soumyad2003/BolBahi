@@ -2,49 +2,80 @@ import type {
   CustomerDoc,
   DraftBill,
   ItemDoc,
+  LowStockAlertItem,
+  RestockDraft,
   TodayStats,
   VoiceParseResponse,
 } from '../../shared/types.ts';
+import {
+  buildRestockDraftFromAlerts,
+  buildRestockDraftFromCatalogLowStock,
+  buildRestockSpokenSummary,
+} from '../../shared/restockMath.ts';
 import { matchCustomer, transliterateDevanagariToLatin } from './fuzzyMatch.ts';
+import { matchOfflineBillingIntent } from './intentMatcher.ts';
 
-const CONFIRM_EXACT_OR_COMBO =
-  /^(?:(?:ha+n?|han|hnn|yes|yep|yeah|ji|ok|okay|theek\s*hai|thik\s*hai|sahi\s*hai|pakka|paka|bilkul|done|chalo|final|accha|achha)\s*)*(?:(?:bhej\s*(?:do|de|dijiye|dena)|bhejdo|bhejo|send(?:\s*(?:it|karo|kar\s*do|kardo))?|save(?:\s*(?:it|karo|kar\s*do|kardo))?|confirm(?:\s*(?:it|karo|kar\s*do|kardo))?|lock(?:\s*(?:karo|kar\s*do|kardo))?|final(?:\s*(?:karo|kar\s*do|kardo))?|kar\s*(?:do|de|dijiye)|kardo|done(?:\s*(?:karo|kar\s*do|kardo))?)\s*)*$/i;
-
-const CONFIRM_DISQUALIFY =
-  /\d|\b(nahi|nhi|mat|cancel|rupaye|rupay|rs|kilo|kg|litre|liter|packet|pkt|cash|upi|gpay|phonepe|paytm|udhaar|udhar|change|badal|hatao|hatado|remove|add|jodo|jod|aur|rate|price)\b/i;
-
-function isConfirmUtterance(clean: string): boolean {
-  if (!clean || CONFIRM_DISQUALIFY.test(clean)) {
-    return false;
-  }
-  // Strip harmless polite/context words ("ji", "bhai", "bill", "whatsapp pe", "please")
-  const stripped = clean
-    .replace(/\b(ji|bhai|bhaiya|sir|please|pls|bill|bil|receipt|whatsapp|pe|par|ko|ye|yeh|isko|ab|abhi)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!stripped) return false;
-  // Require at most 6 core words so long unrelated sentences never trigger confirm
-  if (stripped.split(' ').length > 6) return false;
-  return CONFIRM_EXACT_OR_COMBO.test(stripped);
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const GALLA_PATTERN =
-  /\b(galla|aaj ka hisaab|aaj ka hisab|aj ka hisab|today sales|today sale|kitni bikri|bikri|aaj ki bikri|day end|cash box|din bhar ka hisaab|din bhar ka hisab)\b/i;
+function buildQuickRestockResponse(params: {
+  utterance: string;
+  activeDraft: DraftBill | null;
+  activeRestockDraft?: RestockDraft | null;
+  lowStockAlertItems?: LowStockAlertItem[];
+  items: ItemDoc[];
+}): VoiceParseResponse {
+  const alerts = params.lowStockAlertItems ?? [];
+  const nextRestockDraft =
+    (alerts.length > 0
+      ? buildRestockDraftFromAlerts(alerts, params.utterance, 'pre-router')
+      : null) ?? buildRestockDraftFromCatalogLowStock(params.items, params.utterance, 'pre-router');
 
-const RESTOCK_PATTERN =
-  /\b(kya mangwana|kya mangvana|mangwana hai|mangvana hai|restock|low stock|stock check|kya khatam|samaan mangwana|order list|kam stock)\b/i;
+  if (!nextRestockDraft) {
+    return {
+      intent: 'ORDER_RESTOCK',
+      parserSource: 'pre-router',
+      parserLabel: '0-Token Local',
+      draft: params.activeDraft,
+      restockDraft: params.activeRestockDraft ?? null,
+      targetTab: 'counter',
+      filterCustomerId: null,
+      spokenReply:
+        'Abhi sab items ka stock theek hai. Kisi item ka naam bolkar restock draft bana sakte hain.',
+      bannerMessage: 'All items are currently above reorder threshold.',
+      bannerType: 'info',
+      shouldConfirmActiveDraft: false,
+      editedFields: [],
+    };
+  }
 
-const UDHAAR_QUERY_PATTERN =
-  /\b(kitna baaki|kitna baki|udhaar dikhao|udhar dikhao|purana udhaar|purana udhar|khata dikhao|balance batao|kitna udhaar|kitna udhar|kitna dena hai|baaki hai|baki hai)\b/i;
+  return {
+    intent: 'ORDER_RESTOCK',
+    parserSource: 'pre-router',
+    parserLabel: '0-Token Local',
+    draft: params.activeDraft,
+    restockDraft: nextRestockDraft,
+    targetTab: 'counter',
+    filterCustomerId: null,
+    spokenReply: buildRestockSpokenSummary(nextRestockDraft, false),
+    bannerMessage: null,
+    bannerType: 'success',
+    shouldConfirmActiveDraft: false,
+    editedFields: [],
+  };
+}
 
 /**
  * Zero-Token Pre-Router:
- * Handles deterministic commands in Node.js for 0 LLM tokens before calling Gemini.
+ * Uses the lightweight Trie + Levenshtein offline intent matcher to handle
+ * deterministic commands in Node.js for 0 LLM tokens before calling Gemini.
  */
 export function runPreRouter(params: {
   utterance: string;
   activeDraft: DraftBill | null;
+  activeRestockDraft?: RestockDraft | null;
+  lowStockAlertItems?: LowStockAlertItem[];
   items: ItemDoc[];
   customers: CustomerDoc[];
   todayStats: TodayStats;
@@ -73,9 +104,86 @@ export function runPreRouter(params: {
     };
   }
 
-  // 2. CONFIRM_BILL
-  if (isConfirmUtterance(clean)) {
+  // 2. Trie + Levenshtein Offline Keyword Intent Matching
+  const matchedIntent = matchOfflineBillingIntent(clean);
+  if (!matchedIntent) {
+    return null;
+  }
+
+  // 3. CANCEL_BILL (discards active customer draft first, else active restock draft)
+  if (matchedIntent.intent === 'CANCEL_BILL') {
+    if (params.activeDraft) {
+      return {
+        intent: 'CANCEL_BILL',
+        parserSource: 'pre-router',
+        parserLabel: '0-Token Local',
+        draft: null,
+        targetTab: 'counter',
+        filterCustomerId: null,
+        spokenReply: 'Draft cancel kar diya.',
+        bannerMessage: 'Draft bill cancelled.',
+        bannerType: 'info',
+        shouldConfirmActiveDraft: false,
+        editedFields: [],
+      };
+    }
+
+    if (params.activeRestockDraft) {
+      return {
+        intent: 'CANCEL_BILL',
+        parserSource: 'pre-router',
+        parserLabel: '0-Token Local',
+        draft: null,
+        restockDraft: null,
+        shouldCancelRestockDraft: true,
+        targetTab: 'counter',
+        filterCustomerId: null,
+        spokenReply: 'Restock order draft cancel kar diya.',
+        bannerMessage: 'Restock order draft cancelled.',
+        bannerType: 'info',
+        shouldConfirmActiveDraft: false,
+        editedFields: [],
+      };
+    }
+
+    return {
+      intent: 'CANCEL_BILL',
+      parserSource: 'pre-router',
+      parserLabel: '0-Token Local',
+      draft: null,
+      targetTab: 'counter',
+      filterCustomerId: null,
+      spokenReply: 'Abhi koi draft bill ya restock order nahi hai.',
+      bannerMessage: null,
+      bannerType: null,
+      shouldConfirmActiveDraft: false,
+      editedFields: [],
+    };
+  }
+
+  // 4. ORDER_RESTOCK (quick reply like "haan mangwa lo", "order kar do", "sab mangwa lo")
+  if (matchedIntent.intent === 'ORDER_RESTOCK') {
+    return buildQuickRestockResponse(params);
+  }
+
+  // 5. CONFIRM_BILL
+  if (matchedIntent.intent === 'CONFIRM_BILL') {
     if (!params.activeDraft) {
+      // Contextual shortcut: when a post-confirm low-stock prompt just asked "Kya mangwa loon?"
+      // and the shopkeeper replies with a simple affirmative ("haan", "yes", "ok", "kar do"),
+      // open the Restock Draft directly from those low-stock alerts!
+      const isSimpleAffirmative =
+        /^(ha|haa|haan|han|yes|yep|ok|okay|theek hai|thik hai|sahi hai|kar do|kardo|ha kar do|haan kar do|bilkul|pakka)$/i.test(
+          matchedIntent.matchedPhrase
+        );
+      if (
+        isSimpleAffirmative &&
+        !params.activeRestockDraft &&
+        (params.lowStockAlertItems?.length ?? 0) > 0
+      ) {
+        return buildQuickRestockResponse(params);
+      }
+
       return {
         intent: 'NOISE',
         parserSource: 'pre-router',
@@ -140,8 +248,8 @@ export function runPreRouter(params: {
     };
   }
 
-  // 3. QUERY_GALLA (0 tokens)
-  if (GALLA_PATTERN.test(clean)) {
+  // 6. QUERY_GALLA (0 tokens)
+  if (matchedIntent.intent === 'QUERY_GALLA') {
     const { totalSales, cashTotal, upiTotal, udhaarTotal, billCount } = params.todayStats;
     const reply = `Aaj ka galla: ${billCount} bills, total bikri ${totalSales} rupaye. Cash ${cashTotal}, UPI ${upiTotal}, aur udhaar ${udhaarTotal} rupaye.`;
     return {
@@ -159,8 +267,8 @@ export function runPreRouter(params: {
     };
   }
 
-  // 4. QUERY_RESTOCK (0 tokens)
-  if (RESTOCK_PATTERN.test(clean)) {
+  // 5. QUERY_RESTOCK (0 tokens)
+  if (matchedIntent.intent === 'QUERY_RESTOCK') {
     const lowStock = params.items.filter((i) => i.stock <= i.reorderThreshold);
     const reply =
       lowStock.length === 0
@@ -182,11 +290,12 @@ export function runPreRouter(params: {
     };
   }
 
-  // 5. QUERY_UDHAAR (0 tokens when matched directly to a known customer or general khata check)
-  if (UDHAAR_QUERY_PATTERN.test(clean)) {
+  // 6. QUERY_UDHAAR (0 tokens)
+  if (matchedIntent.intent === 'QUERY_UDHAAR') {
+    const spanPattern = new RegExp(escapeRegex(matchedIntent.matchedSpanText), 'gi');
     const customerPart = clean
-      .replace(UDHAAR_QUERY_PATTERN, '')
-      .replace(/\b(hai|hain|batao|dikhao|check|karo|ka|ke|ki)\b/gi, ' ')
+      .replace(spanPattern, ' ')
+      .replace(/\b(hai|hain|batao|dikhao|check|karo|ka|ke|ki|kitna|udhaar|udhar|baaki|baki|khata|purana)\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 

@@ -20,6 +20,21 @@ import { runPreRouter } from './preRouter.ts';
 import { parseWithLocalFallback } from './localFallbackParser.ts';
 import { parseVoiceWithGeminiOrFallback } from '../services/geminiParser.ts';
 import { toDevanagariHindiSpeech, toHinglishSpeech } from '../../shared/hindiSpeech.ts';
+import { matchOfflineBillingIntent } from './intentMatcher.ts';
+import {
+  applyRestockCommandToDraft,
+  buildPostConfirmLowStockSpeech,
+  computeLowStockAlertsAfterSale,
+  computeSuggestedRestockQty,
+  getProjectedStockAfterDraft,
+  groupRestockLinesBySupplier,
+} from '../../shared/restockMath.ts';
+import type { SupplierDoc } from '../../shared/types.ts';
+
+const MOCK_SUPPLIERS: SupplierDoc[] = [
+  { id: 'u_agarwal', ownerId: 'u', slug: 'agarwal', name: 'Agarwal Wholesale Distributors', phone: '9811223344' },
+  { id: 'u_metro', ownerId: 'u', slug: 'metro', name: 'Metro FMCG Suppliers', phone: '9811556677' },
+];
 
 const MOCK_ITEMS: ItemDoc[] = [
   { id: 'u_atta', ownerId: 'u', slug: 'atta', name: 'Aashirvaad Atta', aliases: ['atta', 'aata', 'aashirvaad atta', 'ashirwad atta'], unit: 'kg', price: 52, gstPercent: 0, stock: 12, reorderThreshold: 10, supplierId: 'u_agarwal' },
@@ -453,6 +468,277 @@ test('Natural Hinglish confirm phrases including "ha bhej do" confirm active dra
   });
   assert.equal(editRes, null);
 });
+
+test('Offline Trie + Levenshtein intent matcher catches exact phrases, ASR typos, and blocks negations/sales', () => {
+  // Exact Trie hits
+  const exactConfirm = matchOfflineBillingIntent('ha bhej do');
+  assert.equal(exactConfirm?.intent, 'CONFIRM_BILL');
+  assert.equal(exactConfirm?.strategy, 'trie-exact');
+  assert.equal(exactConfirm?.score, 1);
+
+  // Levenshtein fuzzy typo hits (Wispr Flow / ASR phonetic slips)
+  const typoConfirm = matchOfflineBillingIntent('ha behj do');
+  assert.equal(typoConfirm?.intent, 'CONFIRM_BILL');
+  assert.equal(typoConfirm?.strategy, 'levenshtein');
+  assert.ok((typoConfirm?.score ?? 0) >= 0.78);
+
+  const typoConfirm2 = matchOfflineBillingIntent('confrm kar do');
+  assert.equal(typoConfirm2?.intent, 'CONFIRM_BILL');
+  assert.equal(typoConfirm2?.strategy, 'levenshtein');
+
+  const typoGalla = matchOfflineBillingIntent('aaj ka gala batao');
+  assert.equal(typoGalla?.intent, 'QUERY_GALLA');
+  assert.equal(typoGalla?.strategy, 'levenshtein');
+
+  const typoRestock = matchOfflineBillingIntent('kya mangana hai');
+  assert.equal(typoRestock?.intent, 'QUERY_RESTOCK');
+  assert.equal(typoRestock?.strategy, 'levenshtein');
+
+  const typoUdhaar = runPreRouter({
+    utterance: 'Rajesh Sharma ka kitna bakki hai',
+    activeDraft: null,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+    todayStats: MOCK_TODAY,
+  });
+  assert.equal(typoUdhaar?.intent, 'QUERY_UDHAAR');
+  assert.equal(typoUdhaar?.filterCustomerId, 'u_rajesh');
+
+  // Cancel phrases resolve cleanly to CANCEL_BILL (both exact Trie and Levenshtein typo)
+  assert.equal(matchOfflineBillingIntent('cancel kar do')?.intent, 'CANCEL_BILL');
+  assert.equal(matchOfflineBillingIntent('cancle kar do')?.intent, 'CANCEL_BILL');
+  assert.equal(matchOfflineBillingIntent('bill cancel kar do')?.intent, 'CANCEL_BILL');
+  assert.equal(matchOfflineBillingIntent('cancel karo')?.intent, 'CANCEL_BILL');
+  assert.equal(matchOfflineBillingIntent('nahi bhej do')?.intent, 'CANCEL_BILL');
+  assert.equal(matchOfflineBillingIntent('mat bhejo')?.intent, 'CANCEL_BILL');
+  assert.equal(matchOfflineBillingIntent('rehne do')?.intent, 'CANCEL_BILL');
+
+  const cancelDraft = buildNewDraftBill({
+    customerQuery: 'Rajesh Sharma',
+    extractedItems: [{ rawName: 'atta', matchedSlug: 'atta', qty: 5, unit: 'kg', overridePrice: null }],
+    cashPaid: 100,
+    upiPaid: 0,
+    isUdhaar: true,
+    transcript: 'test',
+    parserSource: 'fallback',
+    catalog: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+  });
+  const cancelledRes = runPreRouter({
+    utterance: 'cancel kar do',
+    activeDraft: cancelDraft,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+    todayStats: MOCK_TODAY,
+  });
+  assert.equal(cancelledRes?.intent, 'CANCEL_BILL');
+  assert.equal(cancelledRes?.draft, null);
+
+  // Strict safety guards: short negations, item-specific statements & sales must NOT falsely trigger commands
+  assert.equal(matchOfflineBillingIntent('na'), null);
+  assert.equal(matchOfflineBillingIntent('no'), null);
+  assert.equal(matchOfflineBillingIntent('atta hata do'), null);
+  assert.equal(
+    matchOfflineBillingIntent(
+      'Rajesh Sharma ke khate mein 5 kilo Aashirvaad atta, 2 litre Fortune tel, 300 cash diye baaki udhaar'
+    ),
+    null
+  );
+});
+
+test('Low-stock threshold detection, projected draft stock, and smart default restock quantities', () => {
+  // Smart default: max(2 * threshold - stock, threshold)
+  assert.equal(computeSuggestedRestockQty(7, 10), 13);
+  assert.equal(computeSuggestedRestockQty(4, 8), 12);
+  assert.equal(computeSuggestedRestockQty(12, 10), 10);
+  assert.equal(computeSuggestedRestockQty(0, 12), 24);
+
+  // Projected stock during Draft Bill
+  const attaProj = getProjectedStockAfterDraft(MOCK_ITEMS[0], 5); // stock 12, threshold 10 -> 7 kg
+  assert.equal(attaProj.projectedStock, 7);
+  assert.equal(attaProj.isLowStock, true);
+  assert.equal(attaProj.dropsBelowThreshold, true);
+
+  const saltProj = getProjectedStockAfterDraft(MOCK_ITEMS[2], 2); // stock 25, threshold 10 -> 23 pkt
+  assert.equal(saltProj.projectedStock, 23);
+  assert.equal(saltProj.isLowStock, false);
+
+  // Post-sale alerts aggregated across sold lines
+  const alerts = computeLowStockAlertsAfterSale(
+    [
+      { itemId: 'u_atta', qty: 5 },
+      { itemId: 'u_tel', qty: 2 },
+      { itemId: 'u_namak', qty: 1 },
+    ],
+    MOCK_ITEMS
+  );
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].itemId, 'u_atta');
+  assert.equal(alerts[0].remainingStock, 7);
+  assert.equal(alerts[0].suggestedOrderQty, 13);
+  assert.equal(alerts[1].itemId, 'u_tel');
+  assert.equal(alerts[1].remainingStock, 4);
+  assert.equal(alerts[1].suggestedOrderQty, 12);
+
+  const speech = buildPostConfirmLowStockSpeech(alerts);
+  assert.match(speech, /Aashirvaad Atta 7 kg/);
+  assert.match(speech, /Fortune Refined Oil 4 L/);
+  assert.match(speech, /Kya mangwa loon\?/);
+});
+
+test('Voice ORDER_RESTOCK works for quick replies, itemized orders, active draft edits, and cancel in Offline mode', () => {
+  const alerts = computeLowStockAlertsAfterSale(
+    [
+      { itemId: 'u_atta', qty: 5 },
+      { itemId: 'u_tel', qty: 2 },
+    ],
+    MOCK_ITEMS
+  );
+
+  // 1. Trie + Levenshtein quick restock commands (0-token)
+  assert.equal(matchOfflineBillingIntent('haan mangwa lo')?.intent, 'ORDER_RESTOCK');
+  assert.equal(matchOfflineBillingIntent('ha mangwalo')?.intent, 'ORDER_RESTOCK');
+  assert.equal(matchOfflineBillingIntent('order kar do')?.intent, 'ORDER_RESTOCK');
+  assert.equal(matchOfflineBillingIntent('sab mangwa lo')?.intent, 'ORDER_RESTOCK');
+  assert.equal(matchOfflineBillingIntent('restok kar do')?.intent, 'ORDER_RESTOCK');
+
+  // Must NOT match quick Trie when specific items or quantities are mentioned
+  assert.equal(matchOfflineBillingIntent('atta aur tel mangwa lo'), null);
+  assert.equal(matchOfflineBillingIntent('20 kilo atta aur 10 litre tel mangwa lo'), null);
+
+  // 2. Pre-router populates RestockDraft from post-confirm low-stock alerts on "haan mangwa lo"
+  const quickRes = runPreRouter({
+    utterance: 'haan mangwa lo',
+    activeDraft: null,
+    lowStockAlertItems: alerts,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+    todayStats: MOCK_TODAY,
+  });
+  assert.equal(quickRes?.intent, 'ORDER_RESTOCK');
+  assert.equal(quickRes?.restockDraft?.items.length, 2);
+  assert.equal(quickRes?.restockDraft?.items[0].orderQty, 13);
+  assert.equal(quickRes?.restockDraft?.items[1].orderQty, 12);
+
+  // Contextual short affirmative "haan" when lowStockAlerts is visible and no DraftBill is open
+  const shortYes = runPreRouter({
+    utterance: 'haan',
+    activeDraft: null,
+    lowStockAlertItems: alerts,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+    todayStats: MOCK_TODAY,
+  });
+  assert.equal(shortYes?.intent, 'ORDER_RESTOCK');
+  assert.equal(shortYes?.restockDraft?.items.length, 2);
+
+  // 3. Itemized restock without quantities -> smart default quantities
+  const noQtyParsed = parseWithLocalFallback({
+    utterance: 'atta aur tel mangwa lo',
+    activeDraft: null,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(noQtyParsed.intent, 'ORDER_RESTOCK');
+  assert.equal(noQtyParsed.items.length, 2);
+  assert.equal(noQtyParsed.items[0].qty, 0);
+  const noQtyApplied = applyRestockCommandToDraft({
+    activeRestockDraft: null,
+    lowStockAlertItems: alerts,
+    extractedItems: noQtyParsed.items,
+    useAlertDefaults: false,
+    transcript: 'atta aur tel mangwa lo',
+    parserSource: 'fallback',
+    catalog: MOCK_ITEMS,
+    resolveItem: matchCatalogItem,
+  });
+  assert.equal(noQtyApplied.draft?.items[0].orderQty, 13);
+  assert.equal(noQtyApplied.draft?.items[1].orderQty, 12);
+
+  // 4. Itemized restock WITH explicit spoken quantities
+  const explicitParsed = parseWithLocalFallback({
+    utterance: '20 kilo atta aur 10 litre tel mangwa lo',
+    activeDraft: null,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(explicitParsed.intent, 'ORDER_RESTOCK');
+  assert.equal(explicitParsed.items.length, 2);
+  const explicitApplied = applyRestockCommandToDraft({
+    activeRestockDraft: null,
+    lowStockAlertItems: alerts,
+    extractedItems: explicitParsed.items,
+    useAlertDefaults: false,
+    transcript: '20 kilo atta aur 10 litre tel mangwa lo',
+    parserSource: 'fallback',
+    catalog: MOCK_ITEMS,
+    resolveItem: matchCatalogItem,
+  });
+  assert.equal(explicitApplied.draft?.items[0].orderQty, 20);
+  assert.equal(explicitApplied.draft?.items[1].orderQty, 10);
+
+  // 5. Active RestockDraft voice edit ("atta 25 kilo kar do") and removal ("tel hata do")
+  const editParsed = parseWithLocalFallback({
+    utterance: 'atta 25 kilo kar do',
+    activeDraft: null,
+    activeRestockDraft: explicitApplied.draft,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(editParsed.intent, 'ORDER_RESTOCK');
+  const editedDraft = applyRestockCommandToDraft({
+    activeRestockDraft: explicitApplied.draft,
+    lowStockAlertItems: alerts,
+    extractedItems: editParsed.items,
+    useAlertDefaults: false,
+    transcript: 'atta 25 kilo kar do',
+    parserSource: 'fallback',
+    catalog: MOCK_ITEMS,
+    resolveItem: matchCatalogItem,
+  });
+  assert.equal(editedDraft.draft?.items.find((i) => i.slug === 'atta')?.orderQty, 25);
+
+  const removeParsed = parseWithLocalFallback({
+    utterance: 'tel hata do',
+    activeDraft: null,
+    activeRestockDraft: editedDraft.draft,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+  });
+  assert.equal(removeParsed.intent, 'ORDER_RESTOCK');
+  assert.equal(removeParsed.items[0]?.restockAction, 'remove');
+  const afterRemove = applyRestockCommandToDraft({
+    activeRestockDraft: editedDraft.draft,
+    lowStockAlertItems: alerts,
+    extractedItems: removeParsed.items,
+    useAlertDefaults: false,
+    transcript: 'tel hata do',
+    parserSource: 'fallback',
+    catalog: MOCK_ITEMS,
+    resolveItem: matchCatalogItem,
+  });
+  assert.equal(afterRemove.draft?.items.length, 1);
+  assert.equal(afterRemove.draft?.items[0].slug, 'atta');
+
+  // 6. Supplier grouping works cleanly
+  const groups = groupRestockLinesBySupplier(explicitApplied.draft!.items, MOCK_SUPPLIERS);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].supplier?.name, 'Agarwal Wholesale Distributors');
+
+  // 7. Saying "cancel kar do" with RestockDraft open cancels the RestockDraft cleanly
+  const cancelRestock = runPreRouter({
+    utterance: 'cancel kar do',
+    activeDraft: null,
+    activeRestockDraft: afterRemove.draft,
+    items: MOCK_ITEMS,
+    customers: MOCK_CUSTOMERS,
+    todayStats: MOCK_TODAY,
+  });
+  assert.equal(cancelRestock?.intent, 'CANCEL_BILL');
+  assert.equal(cancelRestock?.shouldCancelRestockDraft, true);
+  assert.equal(cancelRestock?.restockDraft, null);
+});
+
 
 
 

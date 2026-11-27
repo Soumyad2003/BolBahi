@@ -1,10 +1,12 @@
 import { AlertTriangle, CheckCircle2, Trash2, UserCheck, X } from 'lucide-react';
-import type { CustomerDoc, DraftBill } from '../../shared/types';
+import type { CustomerDoc, DraftBill, ItemDoc } from '../../shared/types';
+import { getProjectedStockAfterDraft } from '../../shared/restockMath';
 import { formatINR } from '../utils/voiceAndWhatsapp';
 
 interface DraftBillCardProps {
   draft: DraftBill;
   customers: CustomerDoc[];
+  catalogItems: ItemDoc[];
   confirming: boolean;
   onSelectAmbiguousCustomer: (customerId: string) => void;
   onUpdateUnknownRate: (lineId: string, newRate: number, saveToCatalog: boolean) => void;
@@ -18,6 +20,7 @@ interface DraftBillCardProps {
 export function DraftBillCard({
   draft,
   customers,
+  catalogItems,
   confirming,
   onSelectAmbiguousCustomer,
   onUpdateUnknownRate,
@@ -31,6 +34,12 @@ export function DraftBillCard({
   const hasMissingRate = draft.items.some((it) => it.rateMissing);
   const canConfirm = !hasAmbiguity && !hasMissingRate && draft.items.length > 0 && !confirming;
   const editedSet = new Set(draft.editedFields ?? []);
+  const catalogById = new Map(catalogItems.map((ci) => [ci.id, ci]));
+  const totalDraftQtyByItemId = new Map<string, number>();
+  for (const row of draft.items) {
+    if (!row.itemId) continue;
+    totalDraftQtyByItemId.set(row.itemId, (totalDraftQtyByItemId.get(row.itemId) ?? 0) + row.qty);
+  }
   const sortedCustomers = [...customers].sort((a, b) => {
     if (a.slug === 'walk-in') return 1;
     if (b.slug === 'walk-in') return -1;
@@ -162,6 +171,13 @@ export function DraftBillCard({
       <div className="divide-y divide-stone-200 border-t border-b border-stone-200">
         {draft.items.map((item) => {
           const isFlashing = item.justUpdated || editedSet.has(`item:${item.id}`);
+          const catalogItem = item.itemId ? catalogById.get(item.itemId) : undefined;
+          const projected = catalogItem
+            ? getProjectedStockAfterDraft(
+                catalogItem,
+                totalDraftQtyByItemId.get(catalogItem.id) ?? item.qty
+              )
+            : null;
           return (
             <div
               key={item.id}
@@ -186,6 +202,18 @@ export function DraftBillCard({
                       </span>
                     )}
                   </div>
+                  {projected?.isLowStock && catalogItem && (
+                    <p
+                      data-testid={`draft-low-stock-${item.slug}`}
+                      className="text-xs font-medium text-amber-800 font-mono tabular-nums mt-1 flex items-center gap-1.5"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      <span>
+                        After bill: {projected.projectedStock} {catalogItem.unit} left · Low stock (threshold{' '}
+                        {catalogItem.reorderThreshold} {catalogItem.unit})
+                      </span>
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">

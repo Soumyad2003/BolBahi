@@ -44,13 +44,11 @@ export function Header({
   };
 
   const parserStyle =
-    parserLabel === '0-Token Local'
+    parserLabel === 'Gemini Flash-Lite' || parserLabel === '0-Token Local'
       ? 'text-emerald-800 bg-emerald-50 border-emerald-200'
       : parserLabel === 'Offline Local'
         ? 'text-blue-800 bg-blue-50 border-blue-200'
-        : parserLabel === 'Offline Fallback'
-          ? 'text-amber-800 bg-amber-50 border-amber-300'
-          : 'text-stone-800 bg-stone-100 border-stone-200';
+        : 'text-amber-800 bg-amber-50 border-amber-300';
 
   return (
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-stone-200">

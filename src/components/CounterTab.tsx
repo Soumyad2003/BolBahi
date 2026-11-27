@@ -1,12 +1,28 @@
 import { CheckCircle2, ExternalLink, Receipt, RotateCcw } from 'lucide-react';
-import type { CustomerDoc, DraftBill, ParserMode, TransactionDoc } from '../../shared/types';
+import type {
+  CustomerDoc,
+  DraftBill,
+  ItemDoc,
+  LowStockAlertItem,
+  ParserMode,
+  RestockDraft,
+  SupplierDoc,
+  TransactionDoc,
+} from '../../shared/types';
 import { buildWhatsappReceiptUrl, formatINR } from '../utils/voiceAndWhatsapp';
 import { DraftBillCard } from './DraftBillCard';
+import { LowStockAlertBanner } from './LowStockAlertBanner';
+import { RestockDraftCard } from './RestockDraftCard';
 import { VoiceScratchpad } from './VoiceScratchpad';
 
 interface CounterTabProps {
   draft: DraftBill | null;
+  catalogItems: ItemDoc[];
   customers: CustomerDoc[];
+  suppliers: SupplierDoc[];
+  lowStockAlerts: LowStockAlertItem[];
+  restockDraft: RestockDraft | null;
+  receivingGroupKey: string | null;
   processingVoice: boolean;
   confirmingBill: boolean;
   warningBanner: string | null;
@@ -22,6 +38,14 @@ interface CounterTabProps {
   onUpdatePayment: (field: 'cashPaid' | 'upiPaid', amount: number) => void;
   onConfirmDraft: () => Promise<void>;
   onCancelDraft: () => void;
+  onDraftRestockFromAlerts: () => void;
+  onDismissLowStockAlerts: () => void;
+  onUpdateRestockOrderQty: (itemId: string, nextQty: number) => void;
+  onRemoveRestockItem: (itemId: string) => void;
+  onAssignRestockSupplier: (itemId: string, supplierId: string) => void;
+  onMarkRestockSupplierSent: (groupKey: string) => void;
+  onReceiveRestockSupplierGroup: (groupKey: string, itemIds: string[]) => Promise<void>;
+  onCancelRestockDraft: () => void;
   lastSavedTx: TransactionDoc | null;
   undoSecondsLeft: number;
   onUndoLastBill: () => Promise<void>;
@@ -38,7 +62,12 @@ function formatTime(ms?: number): string {
 
 export function CounterTab({
   draft,
+  catalogItems,
   customers,
+  suppliers,
+  lowStockAlerts,
+  restockDraft,
+  receivingGroupKey,
   processingVoice,
   confirmingBill,
   warningBanner,
@@ -54,6 +83,14 @@ export function CounterTab({
   onUpdatePayment,
   onConfirmDraft,
   onCancelDraft,
+  onDraftRestockFromAlerts,
+  onDismissLowStockAlerts,
+  onUpdateRestockOrderQty,
+  onRemoveRestockItem,
+  onAssignRestockSupplier,
+  onMarkRestockSupplierSent,
+  onReceiveRestockSupplierGroup,
+  onCancelRestockDraft,
   lastSavedTx,
   undoSecondsLeft,
   onUndoLastBill,
@@ -72,6 +109,8 @@ export function CounterTab({
           parserMode={parserMode}
           onParserModeChange={onParserModeChange}
           hasActiveDraft={Boolean(draft)}
+          hasLowStockAlert={lowStockAlerts.length > 0}
+          hasActiveRestockDraft={Boolean(restockDraft)}
         />
 
         {/* 5-Second Undo Toast + 1-Click WhatsApp Receipt Banner */}
@@ -129,11 +168,36 @@ export function CounterTab({
           </section>
         )}
 
+        {/* Soft Post-Confirm Low-Stock Alert Banner */}
+        {lowStockAlerts.length > 0 && !restockDraft && (
+          <LowStockAlertBanner
+            alerts={lowStockAlerts}
+            onDraftRestock={onDraftRestockFromAlerts}
+            onDismiss={onDismissLowStockAlerts}
+          />
+        )}
+
+        {/* Editable Supplier-Grouped Restock Draft Card */}
+        {restockDraft && (
+          <RestockDraftCard
+            restockDraft={restockDraft}
+            suppliers={suppliers}
+            receivingGroupKey={receivingGroupKey}
+            onUpdateOrderQty={onUpdateRestockOrderQty}
+            onRemoveItem={onRemoveRestockItem}
+            onAssignSupplier={onAssignRestockSupplier}
+            onMarkSupplierSent={onMarkRestockSupplierSent}
+            onReceiveSupplierGroup={onReceiveRestockSupplierGroup}
+            onCancel={onCancelRestockDraft}
+          />
+        )}
+
         {/* Active Unconfirmed Draft Bill */}
         {draft ? (
           <DraftBillCard
             draft={draft}
             customers={customers}
+            catalogItems={catalogItems}
             confirming={confirmingBill}
             onSelectAmbiguousCustomer={onSelectAmbiguousCustomer}
             onUpdateUnknownRate={onUpdateUnknownRate}
@@ -143,7 +207,7 @@ export function CounterTab({
             onConfirm={onConfirmDraft}
             onCancel={onCancelDraft}
           />
-        ) : (
+        ) : !restockDraft ? (
           <div className="bg-white border border-stone-200 rounded-2xl p-6 text-center space-y-2">
             <Receipt className="w-8 h-8 text-stone-400 mx-auto" />
             <h2 className="text-lg font-semibold text-stone-900">Counter Ready for Next Bill</h2>
@@ -152,7 +216,7 @@ export function CounterTab({
               Unconfirmed Draft until you confirm.
             </p>
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* Recent Bills Feed */}

@@ -6,6 +6,7 @@ import type {
   ItemDoc,
   ParserMode,
   ParserSource,
+  RestockDraft,
 } from '../../shared/types.ts';
 import { parseWithLocalFallback } from '../utils/localFallbackParser.ts';
 
@@ -17,9 +18,10 @@ const COMPRESSED_SKUS =
   'atta,tel,namak,chawal,dal,doodh,cheeni,chai,maggi,parle,surf,colgate,pyaaz,aloo,anda';
 
 const SYSTEM_INSTRUCTION = [
-  'Extract Indian kirana Hinglish/Hindi voice billing entities to strict JSON. Always transliterate customerQuery and rawName into Roman/English letters (e.g. "राजेश शर्मा"->"Rajesh Sharma"). Never compute totals.',
+  'Extract Indian kirana Hinglish/Hindi voice billing or supplier restock entities to strict JSON. Always transliterate customerQuery and rawName into Roman/English letters (e.g. "राजेश शर्मा"->"Rajesh Sharma"). Never compute totals.',
   `Match known item slugs from [${COMPRESSED_SKUS}]; if item is not in list set matchedSlug="" and keep rawName. Keep last value on self-corrections ("nahi"/"sorry").`,
-  'Split cashPaid (cash/nakad/diye) vs upiPaid (UPI/GPay/PhonePe/Paytm). Set intent="EDIT_BILL" only if modifying activeDraft, else "LOG_SALE" or "NOISE".',
+  'Split cashPaid (cash/nakad/diye) vs upiPaid (UPI/GPay/PhonePe/Paytm).',
+  'Intent rules: Use intent="ORDER_RESTOCK" when ordering stock from wholesaler/supplier ("mangwa lo"/"order karo"/"restock") OR whenever ActiveRestockDraft is provided (with no ActiveDraft) and utterance edits/removes/adds items without a customer or payment ("atta 25 kilo kar do", "tel hata do"). For ORDER_RESTOCK set qty=0 if quantity was not spoken, and set restockAction="remove" for removals, "set" for qty edits, else "add". Set intent="EDIT_BILL" only if modifying ActiveDraft, else "LOG_SALE" or "NOISE".',
 ].join('\n');
 
 const RESPONSE_SCHEMA = {
@@ -27,7 +29,7 @@ const RESPONSE_SCHEMA = {
   properties: {
     intent: {
       type: Type.STRING,
-      description: 'LOG_SALE, EDIT_BILL, or NOISE',
+      description: 'LOG_SALE, EDIT_BILL, ORDER_RESTOCK, or NOISE',
     },
     customerQuery: {
       type: Type.STRING,
@@ -43,8 +45,9 @@ const RESPONSE_SCHEMA = {
           qty: { type: Type.NUMBER },
           unit: { type: Type.STRING },
           overridePrice: { type: Type.NUMBER },
+          restockAction: { type: Type.STRING },
         },
-        required: ['rawName', 'matchedSlug', 'qty', 'unit', 'overridePrice'],
+        required: ['rawName', 'matchedSlug', 'qty', 'unit', 'overridePrice', 'restockAction'],
       },
     },
     cashPaid: { type: Type.NUMBER, description: 'Cash paid in INR, or -1 if not mentioned' },
@@ -114,7 +117,7 @@ async function callGeminiModel(
         systemInstruction: SYSTEM_INSTRUCTION,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        maxOutputTokens: 250,
+        maxOutputTokens: 280,
         thinkingConfig: {
           thinkingLevel,
         },
@@ -135,6 +138,7 @@ function sanitizeGeminiJson(rawText: string): ExtractedPayload {
       qty?: number;
       unit?: string;
       overridePrice?: number;
+      restockAction?: string;
     }>;
     cashPaid?: number;
     upiPaid?: number;
@@ -144,19 +148,35 @@ function sanitizeGeminiJson(rawText: string): ExtractedPayload {
   };
 
   const validIntent =
-    parsed.intent === 'EDIT_BILL' || parsed.intent === 'NOISE' ? parsed.intent : 'LOG_SALE';
+    parsed.intent === 'EDIT_BILL' ||
+    parsed.intent === 'ORDER_RESTOCK' ||
+    parsed.intent === 'NOISE'
+      ? parsed.intent
+      : 'LOG_SALE';
 
-  return {
-    intent: validIntent,
-    customerQuery: parsed.customerQuery?.trim() ? parsed.customerQuery.trim() : null,
-    items: Array.isArray(parsed.items)
-      ? parsed.items
-          .filter((it) => it && typeof it.rawName === 'string' && it.rawName.trim().length > 0)
-          .slice(0, 20)
-          .map((it) => ({
+  const items = Array.isArray(parsed.items)
+    ? parsed.items
+        .filter((it) => it && typeof it.rawName === 'string' && it.rawName.trim().length > 0)
+        .slice(0, 20)
+        .map((it) => {
+          const rawQty = typeof it.qty === 'number' && Number.isFinite(it.qty) ? it.qty : 0;
+          const resolvedQty =
+            validIntent === 'ORDER_RESTOCK'
+              ? rawQty > 0
+                ? rawQty
+                : 0
+              : rawQty > 0
+                ? rawQty
+                : 1;
+          const rawAction = (it.restockAction ?? '').trim().toLowerCase();
+          const restockAction: 'add' | 'set' | 'remove' | undefined =
+            rawAction === 'remove' || rawAction === 'set' || rawAction === 'add'
+              ? rawAction
+              : undefined;
+          return {
             rawName: String(it.rawName ?? '').trim(),
             matchedSlug: it.matchedSlug?.trim() ? it.matchedSlug.trim().toLowerCase() : null,
-            qty: typeof it.qty === 'number' && Number.isFinite(it.qty) && it.qty > 0 ? it.qty : 1,
+            qty: resolvedQty,
             unit: it.unit?.trim() ? it.unit.trim() : null,
             overridePrice:
               typeof it.overridePrice === 'number' &&
@@ -164,8 +184,15 @@ function sanitizeGeminiJson(rawText: string): ExtractedPayload {
               it.overridePrice > 0
                 ? it.overridePrice
                 : null,
-          }))
-      : [],
+            restockAction,
+          };
+        })
+    : [];
+
+  return {
+    intent: validIntent,
+    customerQuery: parsed.customerQuery?.trim() ? parsed.customerQuery.trim() : null,
+    items,
     cashPaid:
       typeof parsed.cashPaid === 'number' && Number.isFinite(parsed.cashPaid) && parsed.cashPaid >= 0
         ? parsed.cashPaid
@@ -180,12 +207,14 @@ function sanitizeGeminiJson(rawText: string): ExtractedPayload {
         ? parsed.confidence
         : 0.9,
     ambiguityNote: parsed.ambiguityNote?.trim() ? parsed.ambiguityNote.trim() : null,
+    useAlertDefaults: validIntent === 'ORDER_RESTOCK' && items.length === 0,
   };
 }
 
 export async function parseVoiceWithGeminiOrFallback(params: {
   utterance: string;
   activeDraft: DraftBill | null;
+  activeRestockDraft?: RestockDraft | null;
   items: ItemDoc[];
   customers: CustomerDoc[];
   parserMode?: ParserMode;
@@ -206,18 +235,26 @@ export async function parseVoiceWithGeminiOrFallback(params: {
   }
 
   // Build ultra-compact prompt (~120–180 input tokens max, zero chat history)
-  const minimalDraft = params.activeDraft
-    ? JSON.stringify({
+  const promptParts: string[] = [];
+  if (params.activeDraft) {
+    promptParts.push(
+      `ActiveDraft:${JSON.stringify({
         c: params.activeDraft.customerName,
         items: params.activeDraft.items.map((i) => ({ s: i.slug, q: i.qty, p: i.unitPrice })),
         cash: params.activeDraft.cashPaid,
         upi: params.activeDraft.upiPaid,
-      })
-    : null;
-
-  const userPrompt = minimalDraft
-    ? `ActiveDraft:${minimalDraft}\nUtterance:${params.utterance}`
-    : `Utterance:${params.utterance}`;
+      })}`
+    );
+  }
+  if (params.activeRestockDraft && params.activeRestockDraft.items.length > 0) {
+    promptParts.push(
+      `ActiveRestockDraft:${JSON.stringify(
+        params.activeRestockDraft.items.map((i) => ({ s: i.slug, q: i.orderQty }))
+      )}`
+    );
+  }
+  promptParts.push(`Utterance:${params.utterance}`);
+  const userPrompt = promptParts.join('\n');
 
   const modelsToTry = [PRIMARY_MODEL, FALLBACK_MODEL, 'gemini-4-hydrogen'];
 
@@ -246,6 +283,30 @@ export async function parseVoiceWithGeminiOrFallback(params: {
     }
 
     const payload = sanitizeGeminiJson(rawText);
+
+    // Deterministic guardrail: when an active RestockDraft is open (and no customer DraftBill),
+    // promote pure item edit/remove commands (no customer/payment) to ORDER_RESTOCK if Gemini returned LOG_SALE/EDIT_BILL.
+    if (
+      !params.activeDraft &&
+      params.activeRestockDraft &&
+      params.activeRestockDraft.items.length > 0 &&
+      (payload.intent === 'LOG_SALE' || payload.intent === 'EDIT_BILL') &&
+      !payload.customerQuery &&
+      payload.cashPaid === null &&
+      payload.upiPaid === null &&
+      !payload.isUdhaar &&
+      /\b(kar\s+do|kardo|karo|change|badal|update|hata\s+do|hatado|hatao|remove|delete|nikal|jod\s+do|jodo|add|mangwa|order|restock)\b/i.test(
+        params.utterance
+      )
+    ) {
+      const isRemove = /\b(hata\s+do|hatado|hatao|remove|delete|nikal)\b/i.test(params.utterance);
+      payload.intent = 'ORDER_RESTOCK';
+      payload.items = payload.items.map((it) => ({
+        ...it,
+        restockAction: it.restockAction ?? (isRemove ? 'remove' : 'set'),
+      }));
+    }
+
     return { payload, source: 'gemini', modelUsed };
   } catch (err) {
     console.warn('[BolBahi] Gemini call failed/timed out, using Offline Fallback:', err instanceof Error ? err.message : err);

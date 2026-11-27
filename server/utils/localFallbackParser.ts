@@ -4,6 +4,7 @@ import type {
   ExtractedItem,
   ExtractedPayload,
   ItemDoc,
+  RestockDraft,
 } from '../../shared/types.ts';
 import {
   matchCatalogItem,
@@ -16,6 +17,11 @@ const PAYMENT_STRIP_REGEX =
   /\b\d+(?:\.\d+)?\s*(?:rupaye|rupay|rs|inr)?\s*(?:cash|nakad|naqad|upi|gpay|google\s*pay|phonepe|phone\s*pe|paytm|online|bheja|diye|diya|kiya|kiye|mila|mile)\b/gi;
 
 const UNIT_WORDS = '(?:kilo|kg|kgs|litre|liter|litres|liters|ltr|l|packet|packets|pkt|pkts|piece|pieces|pc|pcs|tube|tubes|bottle|bottles|dabba|pouch|pack|packs)';
+
+const RESTOCK_VERB_REGEX =
+  /\b(mangwa|mangwana|mangva|mangvana|mangwao|mangwalo|order\s+kar|order\s+kardo|order\s+banao|order\s+bana\s+do|order\s+bhej|restock|supplier\s+ko|wholesale|thok)\b/i;
+
+const REMOVE_ITEM_REGEX = /\b(hata\s+do|hatado|hatao|remove|delete|nikal\s+do|nikalo|mat\s+mangwao)\b/i;
 
 function extractPayments(normalized: string): {
   cashPaid: number | null;
@@ -58,7 +64,7 @@ function extractCustomerQuery(rawUtterance: string, customers: CustomerDoc[]): s
   );
   if (leadingMatch) {
     const candidate = leadingMatch[1].trim();
-    if (candidate && !/^(aaj|kal|ek|do|teen|char|panch|\d+)/i.test(candidate)) {
+    if (candidate && !/^(aaj|kal|ek|do|teen|char|panch|supplier|wholesaler|\d+)/i.test(candidate)) {
       return candidate;
     }
   }
@@ -96,6 +102,109 @@ function isEditUtterance(normalized: string, activeDraft: DraftBill | null): boo
     return true;
   }
   return false;
+}
+
+function isRestockUtterance(
+  normalized: string,
+  activeDraft: DraftBill | null,
+  activeRestockDraft: RestockDraft | null | undefined,
+  hasPaymentOrCustomerSale: boolean
+): boolean {
+  if (RESTOCK_VERB_REGEX.test(normalized)) {
+    return true;
+  }
+  if (!activeDraft && activeRestockDraft && !hasPaymentOrCustomerSale) {
+    // Editing or removing items in an open RestockDraft: "atta 25 kilo kar do", "tel hata do", "10 packet maggi add kar do"
+    if (
+      REMOVE_ITEM_REGEX.test(normalized) ||
+      /\b(kar\s+do|kardo|karo|change|badal|update|jod\s+do|jodo|add|bhi|rakh\s+do|rakho)\b/i.test(normalized)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseRestockItems(
+  normalized: string,
+  catalog: ItemDoc[],
+  defaultAction: 'add' | 'set' | 'remove'
+): ExtractedItem[] {
+  const isRemove = REMOVE_ITEM_REGEX.test(normalized);
+  const action: 'add' | 'set' | 'remove' = isRemove ? 'remove' : defaultAction;
+
+  let body = normalized
+    .replace(
+      /\b(supplier\s+ko|wholesaler\s+ko|mangwa\s+lo|mangwa\s+do|mangwa\s+dijiye|mangwalo|mangwa|mangwana|mangva\s+lo|mangva|mangvana|mangwao|order\s+kar\s+do|order\s+kardo|order\s+karo|order\s+bana\s+do|order\s+banao|order\s+bhej\s+do|order|restock\s+kar\s+do|restock\s+karo|restock|hata\s+do|hatado|hatao|remove\s+kar\s+do|remove\s+karo|remove|delete\s+kar\s+do|delete|nikal\s+do|nikalo|jod\s+do|jodo|add\s+kar\s+do|add\s+karo|add|kar\s+do|kardo|karo|rakh\s+do|rakho|change|badal|update|bhej\s+do|bhejdo|bhejo|please|pls|ji|bhai|bhaiya|haan|haa|ha|bhi|hai|hain|ka|ke|ki|ko|se|mein|me|ab|abhi|sab|draft)\b/gi,
+      ' '
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Only split "<qty> [unit] <item> <qty> <unit> <item>" when an item name follows an earlier qty-first pattern
+  body = body.replace(
+    new RegExp(
+      `(\\d+(?:\\.\\d+)?\\s+(?:${UNIT_WORDS}\\s+)?[a-z][a-z\\s-]{1,30}?)\\s+(?=\\d+(?:\\.\\d+)?\\s+${UNIT_WORDS}\\b)`,
+      'gi'
+    ),
+    '$1 , '
+  );
+
+  const chunks = body
+    .split(/\s*(?:,|\baur\b|\band\b|\bplus\b)\s*/i)
+    .map((c) => c.trim())
+    .filter((c) => c.length >= 2);
+
+  const results: ExtractedItem[] = [];
+
+  for (const chunk of chunks) {
+    let rawName = '';
+    let qty = 0; // 0 means "not explicitly stated -> use smart default"
+    let unit: string | null = null;
+
+    // Pattern 1: "<qty> [unit] <item>" (e.g. "20 kilo atta", "24 packet maggi")
+    const qtyFirst = chunk.match(
+      new RegExp(`^(\\d+(?:\\.\\d+)?)\\s*(?:(${UNIT_WORDS})\\s+)?([a-z][a-z0-9\\s-]{1,45})$`, 'i')
+    );
+    // Pattern 2: "<item> <qty> [unit]" (e.g. "atta 25 kilo", "maggi 24 packet")
+    const itemFirst = !qtyFirst
+      ? chunk.match(
+          new RegExp(`^([a-z][a-z0-9\\s-]{1,45}?)\\s+(\\d+(?:\\.\\d+)?)\\s*(${UNIT_WORDS})?$`, 'i')
+        )
+      : null;
+
+    if (qtyFirst) {
+      qty = Number(qtyFirst[1]);
+      unit = qtyFirst[2] ? qtyFirst[2].toLowerCase() : null;
+      rawName = qtyFirst[3];
+    } else if (itemFirst) {
+      rawName = itemFirst[1];
+      qty = Number(itemFirst[2]);
+      unit = itemFirst[3] ? itemFirst[3].toLowerCase() : null;
+    } else {
+      rawName = chunk;
+    }
+
+    rawName = rawName
+      .replace(new RegExp(`\\b${UNIT_WORDS}\\b`, 'gi'), '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!rawName || rawName.length < 2) continue;
+    if (/^(stock|items|item|samaan|saman|low|kam)$/i.test(rawName)) continue;
+
+    const matched = matchCatalogItem(rawName, null, catalog);
+    results.push({
+      rawName: matched?.name ?? rawName,
+      matchedSlug: matched?.slug ?? null,
+      qty: Number.isFinite(qty) && qty > 0 ? qty : 0,
+      unit: unit ?? matched?.unit ?? null,
+      overridePrice: null,
+      restockAction: action,
+    });
+  }
+
+  return results;
 }
 
 function parseEditItems(normalized: string, catalog: ItemDoc[], activeDraft: DraftBill): ExtractedItem[] {
@@ -212,18 +321,42 @@ function parseSaleItems(normalized: string, catalog: ItemDoc[]): ExtractedItem[]
 
 /**
  * Local Offline / Rate-Limit Hinglish Fallback Parser.
- * Used automatically whenever Gemini returns HTTP 429, times out (>4s), or errors.
+ * Used automatically whenever user selects Offline mode or Gemini times out / errors.
  */
 export function parseWithLocalFallback(params: {
   utterance: string;
   activeDraft: DraftBill | null;
+  activeRestockDraft?: RestockDraft | null;
   items: ItemDoc[];
   customers: CustomerDoc[];
 }): ExtractedPayload {
   const normalized = resolveSelfCorrections(normalizeHinglishNumbers(params.utterance));
   const { cashPaid, upiPaid, isUdhaar } = extractPayments(normalized);
   const customerQuery = extractCustomerQuery(params.utterance, params.customers);
+  const hasPaymentOrCustomerSale =
+    cashPaid !== null || upiPaid !== null || isUdhaar || customerQuery !== null;
 
+  // 1. Itemized Restock Order or Active Restock Draft Edit/Remove
+  if (isRestockUtterance(normalized, params.activeDraft, params.activeRestockDraft, hasPaymentOrCustomerSale)) {
+    const restockItems = parseRestockItems(
+      normalized,
+      params.items,
+      params.activeRestockDraft ? 'set' : 'add'
+    );
+    return {
+      intent: 'ORDER_RESTOCK',
+      customerQuery: null,
+      items: restockItems,
+      cashPaid: null,
+      upiPaid: null,
+      isUdhaar: false,
+      confidence: 0.88,
+      ambiguityNote: null,
+      useAlertDefaults: restockItems.length === 0,
+    };
+  }
+
+  // 2. Active Customer Draft Bill Edit
   if (isEditUtterance(normalized, params.activeDraft) && params.activeDraft) {
     const editedItems = parseEditItems(normalized, params.items, params.activeDraft);
     return {
@@ -238,6 +371,7 @@ export function parseWithLocalFallback(params: {
     };
   }
 
+  // 3. New Customer Sale
   const parsedItems = parseSaleItems(normalized, params.items);
   if (parsedItems.length === 0 && cashPaid === null && upiPaid === null) {
     return {

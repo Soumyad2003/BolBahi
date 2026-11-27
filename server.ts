@@ -16,6 +16,8 @@ import {
   buildSpokenBillSummary,
   recalculateDraftTotals,
 } from './server/utils/billMath.ts';
+import { matchCatalogItem } from './server/utils/fuzzyMatch.ts';
+import { applyRestockCommandToDraft } from './shared/restockMath.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +44,10 @@ app.post('/api/voice/parse', async (req, res) => {
 
     const utterance = body.utterance.slice(0, 600).trim();
     const activeDraft = body.activeDraft ?? null;
+    const activeRestockDraft = body.activeRestockDraft ?? null;
+    const lowStockAlertItems = Array.isArray(body.lowStockAlertItems)
+      ? body.lowStockAlertItems.slice(0, 30)
+      : [];
     const items = Array.isArray(body.items) ? body.items.slice(0, 100) : [];
     const customers = Array.isArray(body.customers) ? body.customers.slice(0, 100) : [];
     const todayStats = body.todayStats ?? {
@@ -58,6 +64,8 @@ app.post('/api/voice/parse', async (req, res) => {
     const preRouted = runPreRouter({
       utterance,
       activeDraft,
+      activeRestockDraft,
+      lowStockAlertItems,
       items,
       customers,
       todayStats,
@@ -71,6 +79,7 @@ app.post('/api/voice/parse', async (req, res) => {
     const { payload, source, modelUsed } = await parseVoiceWithGeminiOrFallback({
       utterance,
       activeDraft,
+      activeRestockDraft,
       items,
       customers,
       parserMode,
@@ -82,6 +91,40 @@ app.post('/api/voice/parse', async (req, res) => {
         : parserMode === 'offline'
           ? 'Offline Local'
           : 'Offline Fallback';
+
+    if (payload.intent === 'ORDER_RESTOCK') {
+      const restockResult = applyRestockCommandToDraft({
+        activeRestockDraft,
+        lowStockAlertItems,
+        extractedItems: payload.items,
+        useAlertDefaults: Boolean(payload.useAlertDefaults),
+        transcript: utterance,
+        parserSource: source,
+        catalog: items,
+        resolveItem: matchCatalogItem,
+      });
+
+      const restockResponse: VoiceParseResponse = {
+        intent: 'ORDER_RESTOCK',
+        parserSource: source,
+        parserLabel,
+        draft: activeDraft,
+        restockDraft: restockResult.draft,
+        targetTab: 'counter',
+        filterCustomerId: null,
+        spokenReply: restockResult.spokenReply,
+        bannerMessage:
+          restockResult.unmatchedNames.length > 0
+            ? `Not found in catalog: ${restockResult.unmatchedNames.join(', ')}`
+            : null,
+        bannerType: restockResult.unmatchedNames.length > 0 ? 'warning' : 'success',
+        shouldConfirmActiveDraft: false,
+        editedFields: [],
+        modelUsed,
+      };
+      res.json(restockResponse);
+      return;
+    }
 
     if (payload.intent === 'NOISE' || (payload.items.length === 0 && payload.intent !== 'EDIT_BILL')) {
       const noiseResponse: VoiceParseResponse = {
